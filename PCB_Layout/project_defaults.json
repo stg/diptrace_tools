@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "recipe": {
+    "groups": [],
+    "view": {
+      "labels": true,
+      "pads": false,
+      "tracks": false,
+      "vias": false,
+      "routing_scope": "All",
+      "layers": null,
+      "preview": false,
+      "y_down": true,
+      "rotate_workspace": true,
+      "display_group": 0
+    },
+    "clearance_mm": 0.2,
+    "rotation_offsets": {},
+    "replication": {
+      "mode": "Create copies",
+      "source": 0,
+      "layout": "Linear",
+      "count": 2,
+      "dx": 7.62,
+      "dy": 0,
+      "columns": 2,
+      "rows": 2,
+      "column_dx": 7.62,
+      "column_dy": 0,
+      "row_dx": 0,
+      "row_dy": 7.62,
+      "center_x": 0,
+      "center_y": 0,
+      "automatic_angle": true,
+      "angle_deg": 45
+    }
+  }
+}

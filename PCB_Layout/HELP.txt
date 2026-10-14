@@ -1,0 +1,88 @@
+PCB Layout — How to use
+=======================
+
+Inspect compact placement and repeat complex placement/routing edits across
+groups of parts. Open a DipTrace PCB XML export (.dipxml), then choose a JSON
+filename for your layout recipe. You can reopen either file. Different recipe
+JSON files can refer to the same PCB and hold different replication patterns.
+
+View a placement
+----------------
+Add groups with comma-separated RefDes lists. Each group gets its own color.
+With no groups, the whole PCB is selected. The group selector can focus the
+view; clearance checks still include all groups in the current selection.
+
+Wheel to zoom, drag to pan, and Fit to frame the selection. Click a part to
+inspect it. Labels, Pads, Tracks and Vias can be shown independently; copper
+is off by default. When enabled, choose its layers and whether routing is
+shown for the source only or all groups. Current PCB always uses actual PCB
+content, not an imagined repetition of the source.
+
+Red means a same-side body gap is below the configured minimum (initially
+0.2 mm). Tools -> Settings changes the gap and viewing orientation. Pads and
+leads are excluded from body clearance. This checks the selected placement,
+not all manufacturing or electrical constraints of the board.
+
+Body dimensions
+---------------
+Right-click a part -> Define body size. Match a pattern, a component Name,
+or both, and enter body width, height and an orientation correction in mm
+and degrees. Priority is pattern, then name, then pattern + name. The most
+recent entry wins within the same priority. Entries are shared by recipes.
+Removing the current match reveals the next matching entry, then fallback.
+
+When no size matches, the part's component outline is drawn; otherwise its
+silkscreen is used. The status/inspector distinguishes these drawing-based
+fallbacks from body dimensions. Fallback clearance uses their convex envelope
+and is an estimate. A marker means no usable body drawing exists, so that
+part cannot be checked. Body rotation correction is a recipe-only viewing
+correction; it does not rotate the actual part in the exported PCB.
+
+Replicate an edit
+-----------------
+Open the Replication fold-out (also available under Tools).
+Select the source group, action and arrangement, then check Preview.
+
+Create copies: specify the total instances, including the source. A grid
+uses columns × rows instead of a separate count. With no groups, the whole
+PCB is the source. New parts receive unused RefDes/component IDs; only nets
+connecting two or more selected pads are copied, with fresh Net N names.
+Connections to outside parts are omitted, and single external pads become
+unconnected. Original parts and routing are retained.
+
+Arrange existing groups: the entered lists provide the count. Put corresponding
+parts in corresponding list positions. Footprints, pads and net mapping are
+validated. Destination identities and nets remain intact; the source group's
+placement and selected internal routing replace the destination arrangement.
+
+Linear uses X/Y step per instance. Grid uses separate X/Y vectors for columns
+and rows. Rotational uses a center and angle step, or equal spacing over 360°.
+For existing groups, list order defines their arrangement positions and the
+source group remains anchored at its current position.
+
+The same internal-routing selection drives display and export: paths between
+pads in a group, including intervening vias, without external branches or
+dangling loops. Layer checkboxes also limit copied copper. Tracks through
+vias require Vias enabled. Vias alone can be copied as standalone static vias.
+Pads is a display option; the footprint pads always accompany a copied part.
+Source only/All is a display scope, not a limit on the number of copies.
+
+Save replicated PCB as writes the previewed PCB XML. Generated group lists
+are filled into the recipe, which then opens the resulting PCB for further
+edits. Save recipe as can retain another recipe for a different study. The
+input PCB is unchanged unless you explicitly choose it as the output; that
+case creates a timestamped backup. Re-import the output into DipTrace and
+run its checks. External routing remains in its old position and may need
+rerouting after existing parts move. Board outlines, copper pours and other
+board graphics are retained but are not repeated with a group.
+
+Starting and settings
+---------------------
+Windows: Launch PCB Layout.cmd. macOS: Launch PCB Layout.command.
+Linux: sh "Launch PCB Layout.sh". See the root README for dependencies.
+Recipes store groups, display options and replication settings. Program
+settings store recent files and window position. Tools can open those JSON
+files and the central component_sizes.json. Save/reload sizes after editing
+that file externally. Defaults can be changed in a recipe or size entry.
+Tools -> Open new-recipe defaults changes the templates copied when opening
+a new PCB; existing recipes retain their own settings.

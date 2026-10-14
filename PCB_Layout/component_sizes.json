@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "sizes": [
+    {"pattern": "0402", "pattern_match": "contains", "width_mm": 1.05, "height_mm": 0.55, "rotation_deg": 0},
+    {"pattern": "SOT23", "pattern_match": "contains", "width_mm": 3.05, "height_mm": 1.4, "rotation_deg": 90},
+    {"pattern": "0805", "pattern_match": "contains", "width_mm": 2.2, "height_mm": 1.4, "rotation_deg": 0}
+  ]
+}

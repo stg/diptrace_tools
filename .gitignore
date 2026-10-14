@@ -6,6 +6,9 @@ __pycache__/
 /Part_DB/parts.json
 /Part_DB/settings.json
 /Part_DB/part_locations.json
+/PCB_Layout/settings.json
+*.dipxml.tmp
+*.pcb_layout.json
 /Shared/normalization_verification.json
 /JLCPCB_BOM/lcsc/
 /JLCPCB_BOM/*.xls

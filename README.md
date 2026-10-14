@@ -1,12 +1,14 @@
 # DipTrace Tools
 
-Two desktop tools for using existing DipTrace designs and preparing assembly orders. Both use Python/PySide6 and a shared, configurable normalization language, with launchers for Windows, macOS and Linux.
+Three desktop tools for reusing DipTrace designs, preparing assembly orders and refining PCB placement. All use Python/PySide6, with launchers for Windows, macOS and Linux. Part_DB and JLCPCB_BOM share a configurable normalization language.
 
 ## Why these tools exist
 
 **Part_DB** tracks historical use of parts, with optional storage locations. It helps you find parts used in the past, where they are stored, and which projects used them.
 
 **JLCPCB_BOM** helps create, maintain, verify and back-annotate JLCPCB BOMs. It connects schematic data, editable project JSON and JLCPCB workbooks, so changes can be carried between design and ordering stages instead of re-entered. Schematic fields can be brought into JSON, JLCPCB selections can be read back into it, and edited Name/Value fields can be back-annotated into DipTrace.
+
+**PCB_Layout** helps judge the feasibility of compact placement and repeatedly apply complex placement and routing edits across circuit groups. It makes repeated linear, grid and rotational arrangements practical to preview and update when doing the same work directly in DipTrace would be difficult.
 
 ## Part_DB
 
@@ -16,7 +18,7 @@ Two desktop tools for using existing DipTrace designs and preparing assembly ord
 
 Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Select a base folder and filter fields under **Tools → Settings**, then refresh. **Help → How to use** opens the user guide.
 
-<img src="part_db_screen.png" alt="Part_DB" width="721" height="453">
+<img src="part_db_screen.png" alt="Part_DB" width="720">
 
 ## JLCPCB_BOM
 
@@ -28,7 +30,19 @@ Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Sele
 
 Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor.cmd)**. Export a DipTrace XML schematic and a placement CSV in mm, inches or mils. **Help → How to use** explains the ordering and back-annotation workflow.
 
-<img src="jlcpcb_bom_screen.png" alt="JLCPCB_BOM" width="921" height="556">
+<img src="jlcpcb_bom_screen.png" alt="JLCPCB_BOM" width="720">
+
+## PCB_Layout
+
+- **See whether a compact arrangement has room to assemble.** Compare colored groups using actual body dimensions, exact body-gap checks, and component outline or silkscreen fallbacks.
+- **Repeat complex circuit edits as one operation.** Create fresh copies or update existing groups, preserving destination nets and limiting routing to internal connections.
+- **Explore arrangements without losing the current design.** Preview linear, grid or rotational placement and keep multiple reusable JSON recipes for one PCB.
+
+Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a DipTrace PCB XML, choose a recipe JSON filename and add groups of RefDes. Replication controls stay folded away for ordinary viewing. **Help → How to use** explains body sizes, internal routing and export.
+
+<img src="pcb_layout_screen.png" alt="PCB_Layout" width="720">
+
+The central [component_sizes.json](PCB_Layout/component_sizes.json) starts with 0402 (1.05 × 0.55 mm), SOT23 (3.05 × 1.4 mm, 90° correction), and 0805 (2.2 × 1.4 mm) body rectangles from the reference viewer. Right-click a part to define a pattern, name, or combined match. Priority is **pattern < name < pattern + name**. The initial body gap is 0.2 mm; dimensions and gap can be changed. These are body checks, excluding pads and leads. Outline/silkscreen fallback checks are estimates.
 
 ## Defaults you can change
 
@@ -70,25 +84,30 @@ The global [AI check settings](JLCPCB_BOM/ai_check_settings.json) control the in
 
 ## Installation and repository contents
 
-Keep `Part_DB`, `JLCPCB_BOM` and `Shared` as sibling folders in a writable location. Install Python 3.10 or newer, then the relevant dependencies (use `python3` on macOS/Linux):
+Keep `Part_DB`, `JLCPCB_BOM`, `PCB_Layout` and `Shared` as sibling folders in a writable location. Install Python 3.10 or newer, then the relevant dependencies (use `python3` on macOS/Linux):
 
 ```powershell
 python -m pip install -r Part_DB/requirements.txt
 python -m pip install -r JLCPCB_BOM/requirements-editor.txt
+python -m pip install -r PCB_Layout/requirements.txt
 ```
 
 | Platform | Launcher in each program folder |
 | --- | --- |
 | Windows | Double-click `Launch ….cmd` |
 | macOS | Double-click `Launch ….command` |
-| Linux | Run `sh "Part_DB/Launch Part Database.sh"` or `sh "JLCPCB_BOM/Launch JLCPCB BOM Editor.sh"` from the repository root |
+| Linux | Run the program's `.sh` launcher, e.g. `sh "PCB_Layout/Launch PCB Layout.sh"`, from the repository root |
 
-For downloaded copies on macOS, first run `chmod +x Part_DB/*.command JLCPCB_BOM/*.command`. A virtual environment can be used on any platform; activate it before running a launcher from a terminal. On Linux, install your distribution's Qt desktop dependencies if Qt reports a missing platform plugin. A graphical desktop session is required.
+For downloaded copies on macOS, first run `chmod +x Part_DB/*.command JLCPCB_BOM/*.command PCB_Layout/*.command`. A virtual environment can be used on any platform; activate it before running a launcher from a terminal. On Linux, install your distribution's Qt desktop dependencies if Qt reports a missing platform plugin. A graphical desktop session is required.
 
 Files open with the system's default application. Install or associate a suitable application for each file type; opening a schematic requires a handler for DipTrace files. Scanning, searching and generating outputs do not require DipTrace to be running. The macOS/Linux paths and launchers have automated dispatch checks, but have not been tested on native desktops yet.
 
 Settings remain separate: Part_DB stores its preferences in `Part_DB/settings.json`; JLCPCB_BOM uses Qt's per-user settings (Windows registry, macOS preferences, or a Linux configuration file). Part_DB's `parts.json` and `part_locations.json` are local user data and are excluded from Git, along with supplier caches and generated reports.
 
+PCB_Layout keeps recent/window preferences in `PCB_Layout/settings.json`, body dimensions in its central `component_sizes.json`, and study settings in user-named recipe JSON files. Opening a PCB prompts for a recipe filename; opening that recipe restores its PCB, groups and arrangement. Exported PCB XML must be re-imported into DipTrace. Outlines, pours and board graphics are retained rather than repeated with a group.
+
+[PCB_Layout project defaults](PCB_Layout/project_defaults.json), available under Tools, are copied into new recipes. Changing those templates does not change an existing study.
+
 DipTrace-ReverseEngineer is excluded from this repository. Part_DB includes the extracted structural parser it needs, so that source project is unnecessary at runtime. The detailed per-tool READMEs remain available for implementation and behavior reference.
 
-The root screenshots are embedded at half their original dimensions; the original image files are unchanged.
+The root screenshots are displayed at 720 pixels wide with their original proportions; the original image files are unchanged.
