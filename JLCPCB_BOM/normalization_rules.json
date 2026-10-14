@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "description": "Exclude DNP/DNM markers in component names from assembly output.",
+      "operation": "exclude",
+      "when": {"name": "(?:^|[ \\t/])(?:DNP|DNM)(?:$|[ \\t/])"},
+      "ignore_case": true,
+      "enabled": true
+    },
+    {
+      "description": "Exclude DNP/DNM markers in component values from assembly output.",
+      "operation": "exclude",
+      "when": {"value": "(?:^|[ \\t/])(?:DNP|DNM)(?:$|[ \\t/])"},
+      "ignore_case": true,
+      "enabled": true
+    },
+    {
+      "description": "Existing assembly value formatting, including resistor links on other designators.",
+      "operation": "normalize_discrete_values",
+      "enabled": true,
+      "designator_units": {"R": "Ω", "C": "F"},
+      "explicit_resistance": true,
+      "match_first_letter": true,
+      "recognized_only": false
+    },
+    {
+      "description": "Simplify recognized package names to their four-digit size.",
+      "operation": "regex_replace",
+      "field": "pattern",
+      "pattern": "^(?:(?:RES|CAP|IND|DIO)_?|[RCID]_?)(\\d{4})(?:_[A-Z])?$",
+      "replacement": "\\g<1>",
+      "ignore_case": true,
+      "enabled": true
+    }
+  ]
+}

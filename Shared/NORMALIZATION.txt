@@ -1,0 +1,114 @@
+Normalization rule language
+===========================
+
+Part_DB and JLCPCB_BOM use this shared engine, with a normalization_rules.json file
+in each program folder. Edit the file through the program's menu. Part_DB applies
+it on Refresh; JLCPCB_BOM applies it to output previews and generated assembly
+files. It does not change source schematics or saved project component data.
+
+A file contains {"schema_version": 1, "rules": [...]}. Rules run from first
+to last. Each rule sees the values produced by previous rules. A description
+is optional. enabled defaults to true; false disables a rule. An empty rules
+list leaves names, values and patterns unchanged.
+
+Fields and conditions
+---------------------
+Rules can change name, value and pattern. refdes is available for conditions
+but cannot be changed. when is an optional object containing field/regex
+pairs. Every condition must match. Regex uses search matching; ^ and $ anchor
+an entire field. ignore_case defaults to false and applies to both conditions
+and the replacement pattern. Inline flags such as (?i) are also supported.
+
+Example: "when": {"refdes": "^C", "name": "^CAP$"}
+Both conditions must match. Use regex alternation (a|b) for alternatives in
+one field, or separate rules for alternatives across different fields.
+In grouped LCSC assembly rows, refdes is the first designator, matching the
+established output behavior. Part_Part_DB applies rules to individual symbol records.
+
+Operations
+----------
+exclude
+  Marks a matching component for omission from JLCPCB_BOM's BOM and CPL output.
+  Typically has when conditions, e.g. {"value": "(?:^|[ \\t/])DNP(?:$|[ \\t/])"}.
+  Two rules allow exclusion based on name OR value. Exclusion is remembered
+  even if later rules change the marker text. Part_DB keeps these components;
+  exclusion is an assembly-output decision, not a search-database filter.
+
+regex_replace
+  field: name, value or pattern
+  pattern: regex string
+  replacement: replacement string; capture references are supported
+  count: maximum replacements, default 0 = all matches
+
+set
+  field: name, value or pattern
+  text: fixed replacement for the whole field
+  Typically combined with when to set a value only for matching components.
+
+format_quantity
+  field: name, value or pattern (normally value)
+  unit: Ω, F or H
+  Formats the leading numeric token: 4k7 -> 4.7kΩ; 2u2 -> 2.2µF.
+  Keeps trailing tolerance, voltage and assembly notes. SI prefixes remain
+  case-sensitive; m and M differ. u, U, μ and µ represent micro.
+  recognized_only: default true; unknown text or conflicting units stays as
+  supplied. false uses the legacy assembly formatter, including its automatic
+  unit suffix. This mode is used by JLCPCB_BOM's compatibility defaults.
+  Does not rescale quantities: 100nF and 0.1µF remain different spellings.
+
+normalize_discrete_values
+  Built-in selection of resistor/capacitor formatting, used by LCSC defaults.
+  designator_units: defaults to {"R": "Ω", "C": "F"}; H also supported
+  explicit_resistance: default true; resistance notation on other designators
+  match_first_letter: default false; true matches the first designator letter
+  recognized_only: default true; LCSC uses false to preserve existing outputs
+  Custom regex conditions and enabled work on this operation too.
+
+Examples to put inside the rules list
+------------------------------------
+Remove exact generic names, ignoring case:
+
+  {"operation": "regex_replace", "field": "name",
+   "pattern": "^(?:RES|CAP)$", "replacement": "", "ignore_case": true}
+
+Format inductor values (unit selection stays in the rules file):
+
+  {"operation": "format_quantity", "field": "value",
+   "when": {"refdes": "(?i)^L(?:$|[^A-Z])"}, "unit": "H"}
+
+Remove a footprint prefix and retain the captured size:
+
+  {"operation": "regex_replace", "field": "pattern",
+   "pattern": "^PKG_(\\d{4})$", "replacement": "\\g<1>"}
+
+Rewrite decimal commas only on capacitor values:
+
+  {"operation": "regex_replace", "field": "value",
+   "when": {"refdes": "^C"}, "pattern": "(\\d+),(\\d+)",
+   "replacement": "\\g<1>.\\g<2>"}
+
+Set a component name only when both footprint and name match:
+
+  {"operation": "set", "field": "name", "text": "Test point",
+   "when": {"pattern": "^TESTPOINT", "name": "^TP$"}}
+
+JSON requires backslashes to be doubled: write \\d for a regex digit and
+\\g<1> for the first capture in a replacement. Regex syntax follows Python's
+regular-expression syntax. Rules are data; Python code is not evaluated.
+Patterns and replacement captures are validated before extraction/export.
+
+Defaults and updates
+--------------------
+The repository README.md lists each program's shipped normalization defaults.
+Each program has its own JSON file; you can customize them independently.
+
+After changing Part_DB rules, refresh; the program must read all schematics again.
+Changing descriptions alone does not invalidate the DB cache. LCSC rules are
+re-read when changed and before generating output. Invalid rules abort before
+replacing database/output files. Keep Shared beside Part_DB and JLCPCB_BOM when moving
+the tools; both programs need it.
+
+Older custom files may also use clear_names (exact names list; case_sensitive)
+and clear_name_when_pattern_starts_with_name (names list or null,
+case_sensitive, require_token_boundary). These compatibility operations are
+not needed for new regex rules.

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "project": {
+    "output_folder": "./order",
+    "cpl_file": "{stem}_CPL.csv",
+    "bom_file": "{stem}_BOM.xls",
+    "cpl_output_file": "{stem}_CPL.xls",
+    "cpl_decimals": 3
+  }
+}

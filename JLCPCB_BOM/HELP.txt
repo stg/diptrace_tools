@@ -1,0 +1,123 @@
+JLCPCB BOM Editor
+==================
+
+Starting the program
+--------------------
+Windows: double-click "Launch JLCPCB BOM Editor.cmd".
+macOS: double-click "Launch JLCPCB BOM Editor.command".
+Linux: run sh "Launch JLCPCB BOM Editor.sh" from this folder.
+Install Python and the dependencies first; see the root README for setup.
+Files open with your system's default application for that file type.
+
+What it does
+------------
+Prepares your DipTrace design for JLCPCB assembly: edit component data,
+choose parts and alternatives, generate BOM and placement workbooks,
+and bring selected name/value changes back into DipTrace.
+
+1. Bring in your DipTrace design
+-------------------------------
+In DipTrace, export the schematic as a DipTrace XML schematic (.dchxml).
+Open that file in the BOM Editor. The editor creates a matching .json file
+beside it to store your edits, JLCPCB part numbers and alternatives.
+
+For assembly output, also export the PCB placement/CPL CSV, with both
+coordinate headers specifying mm, inches or mils. Put it beside the schematic,
+named after the schematic: Board.dchxml expects Board_CPL.csv.
+
+2. Edit and generate assembly files
+----------------------------------
+The left columns show the schematic; the middle columns are your editable
+JSON data; the right columns show assembly output. Red highlights differences;
+yellow highlights details that need review. Save JSON keeps your edits.
+Edit -> Focus filter (Ctrl+F) selects the filter text. Copy selected rows
+(Ctrl+C) copies the displayed columns. File -> Reload (Ctrl+R) rereads the
+schematic and JSON; it asks before discarding unsaved edits.
+All filter words must match, ignoring case. Wildcards: * is any text,
+# is one or more digits, and ? is one character. R# finds numbered resistor
+designators; use \*, \# or \? to match the symbols literally.
+
+Adjust names, values, footprints and JLCPCB part numbers as needed. Alternatives let
+you choose a different part for assembly while retaining the primary part.
+Generate outputs saves JSON and creates the BOM and CPL workbooks, normally
+in the order folder. Values and recognized footprints are formatted for
+assembly. Exclusion rules remove parts from both the BOM and CPL files.
+
+Upload these workbooks to JLCPCB and review the selected JLCPCB parts there.
+
+3. Review and read back the selected JLCPCB parts
+----------------------------------------------
+Download the BOM/part-selection workbook from JLCPCB. Tools -> JLCPCB part numbers
+from XLS(X) reads both the simple JLC BOM format and the BOM Matching /
+Assembly Order format, including workbooks with an .xls or .xlsx filename.
+
+Numbers are matched by designator. When an incoming number conflicts with
+your saved primary number, choose whether to replace it, add an alternative,
+or skip it.
+
+Tools -> Check JLCPCB BOM from XLS(X) prepares a text file for an AI checking pass.
+It collects supplier product details and combines them with the descriptions in
+your selected workbook and ready-to-use instructions for finding mismatches.
+The text file is saved beside the workbook and opened for you.
+
+Copy or attach that text to an AI assistant to run the comparison and report
+mismatched parts. RoHS status is checked separately by the tool. Review the
+findings, edit your parts or alternatives as needed, choose the final output
+selection, then generate again to produce your final assembly files.
+
+Tools -> Open AI check settings lets you customize the AI instructions and
+accepted substitutions in a JSON file. Save it before the next check; the
+new instructions will be included in the generated text.
+
+4. Bring edits back into DipTrace
+--------------------------------
+Back-annotate to schematic updates primary Name and Value in the .dchxml
+file and creates a backup. It does not write footprints or JLCPCB part numbers.
+
+You must re-import the updated XML schematic into DipTrace, review it and
+save the design there. Back-annotation alone does not change your binary
+.dch schematic. After later edits in DipTrace, export a fresh XML schematic
+and Reload in the BOM Editor to compare it with your saved JSON.
+
+Expected filenames
+------------------
+For a schematic called Board:
+
+  Board.dchxml           XML schematic exported from DipTrace
+  Board.json             Editor data, created beside the schematic
+  Board_CPL.csv          Placement export, beside the schematic
+  order/Board_BOM.xls    Generated assembly BOM
+  order/Board_CPL.xls    Generated assembly placement workbook
+
+These are the defaults. Tools -> Open project settings JSON lets you change
+the output folder, source CPL filename and generated BOM/CPL filenames for
+this project. The source CPL must stay beside the schematic.
+Tools -> Open new-project defaults edits the templates copied into newly
+created projects; changing those defaults does not alter existing projects.
+Generate replaces the generated workbooks. Your source CPL CSV is unchanged.
+
+Expected placement CSV columns
+------------------------------
+Use these DipTrace export columns (order may vary):
+
+  RefDes;Origin X (mm);Origin Y (mm);Side;Rotation
+
+RefDes may be called Designator; Side may be Layer. Coordinate names may
+also be Mid X/Mid Y or X/Y, but each header must include its unit in brackets.
+Use (mm), (in)/(inch)/(inches), or (mil)/(mils). Rotation is in degrees.
+Comma, semicolon and tab separators are accepted; extra columns are allowed.
+
+Coordinates are converted to mm before placement corrections. Output X/Y
+uses three decimal places by default; cpl_decimals in the project JSON can
+change this. New-project defaults also include that setting. The source
+CSV is never rewritten.
+
+Custom normalization
+--------------------
+Tools -> Open normalization rules opens the rules used to format output
+names, values and footprints and exclude unwanted parts. Excluded parts are
+removed from both BOM and CPL. You can change the expressions or add custom
+rules; the repository README.md lists the shipped defaults and
+Help -> Normalization rule reference provides the language and examples.
+Save the rules and generate again. Your schematic and editable component
+fields are unchanged by output normalization.

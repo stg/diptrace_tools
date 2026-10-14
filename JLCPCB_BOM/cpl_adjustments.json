@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "footprints": {
+    "SOIC-16/150mil": {
+      "rotation_deg": -90,
+      "x_mm": 0
+    },
+    "SOT23": {
+      "rotation_deg": 180
+    },
+    "SOT23-5": {
+      "rotation_deg": -90
+    },
+    "SOT353": {
+      "rotation_deg": 90
+    },
+		"SOIC-8/150mil": {
+			"rotation_deg": -90
+		},
+		"CR2032-BS-5-1": {
+			"rotation_deg": 180
+		},
+		"SOT323": {
+			"rotation_deg": 0
+		},
+		"SW STD Tactile 6mm SMD": {
+			"rotation_deg": 90
+		},
+		"SIM-110": {
+      "y_mm": -1.2
+		},
+		"RM520N 3042/3052": {
+      "x_mm": 1.5
+		},
+		"MSOP-8": {
+			"rotation_deg": -90
+		},
+		"MSOP-10": {
+			"rotation_deg": -90
+		}
+  }
+}

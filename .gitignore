@@ -1,0 +1,17 @@
+/DipTrace-ReverseEngineer/
+__pycache__/
+*.py[cod]
+*.error.log
+*.json.tmp
+/Part_DB/parts.json
+/Part_DB/settings.json
+/Part_DB/part_locations.json
+/Shared/normalization_verification.json
+/JLCPCB_BOM/lcsc/
+/JLCPCB_BOM/*.xls
+/JLCPCB_BOM/*.xlsx
+/JLCPCB_BOM/*.txt
+!/JLCPCB_BOM/HELP.txt
+!/JLCPCB_BOM/BOM_EDITOR_README.txt
+!/JLCPCB_BOM/requirements.txt
+!/JLCPCB_BOM/requirements-editor.txt

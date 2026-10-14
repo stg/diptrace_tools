@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "description": "Remove generic component names; keep manufacturer and part-specific names.",
+      "operation": "regex_replace",
+      "field": "name",
+      "enabled": true,
+      "pattern": "^(?:RES|CAP|IND)$",
+      "replacement": "",
+      "ignore_case": true
+    },
+    {
+      "description": "Format resistor values; keep trailing tolerance and assembly notes.",
+      "operation": "format_quantity",
+      "field": "value",
+      "enabled": true,
+      "when": {
+        "refdes": "(?i)^R(?:$|[^A-Z])"
+      },
+      "unit": "Ω"
+    },
+    {
+      "description": "Format capacitor values; keep trailing voltage and dielectric notes.",
+      "operation": "format_quantity",
+      "field": "value",
+      "enabled": true,
+      "when": {
+        "refdes": "(?i)^C(?:$|[^A-Z])"
+      },
+      "unit": "F"
+    },
+    {
+      "description": "Also format explicit resistance on other designators, e.g. L5 = 0R.",
+      "operation": "format_quantity",
+      "field": "value",
+      "enabled": true,
+      "when": {
+        "value": "^(?:\\S*(?:R|Ω|Ω|[Oo]hms?)(?:\\s|$)|[+-]?\\d+R\\d+(?:\\s|$))"
+      },
+      "unit": "Ω"
+    },
+    {
+      "description": "Format inductor values after explicit resistance links have been identified.",
+      "operation": "format_quantity",
+      "field": "value",
+      "enabled": true,
+      "when": {
+        "refdes": "(?i)^L(?:$|[^A-Z])"
+      },
+      "unit": "H"
+    },
+    {
+      "description": "Simplify recognized package names to their four-digit size.",
+      "operation": "regex_replace",
+      "field": "pattern",
+      "pattern": "^(?:(?:RES|CAP|IND|DIO)_?|[RCID]_?)(\\d{4})(?:_[A-Z])?$",
+      "replacement": "\\g<1>",
+      "ignore_case": true,
+      "enabled": true
+    }
+  ]
+}
