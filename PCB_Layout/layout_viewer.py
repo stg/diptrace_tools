@@ -24,8 +24,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QScrollArea, QInputDialog)
 
 
+GROUP_COLORS = ('#9dd9f3', '#b6e3a4', '#f4cf8c', '#d0b8ed',
+                '#f5b5c6', '#98dfd3', '#c5d2f2', '#e5d99a')
+
+
 def color(index):
-    return QColor.fromHsvF((index*.381966) % 1,.38,.94)
+    if index < len(GROUP_COLORS):
+        return QColor(GROUP_COLORS[index])
+    return QColor.fromHsvF((index*.381966) % 1,.30,.95)
 
 
 def spin(value, minimum=-100000, maximum=100000, decimals=3):
@@ -553,6 +559,8 @@ class Viewer(QMainWindow):
                     if self.checks['labels'].isChecked():
                         text = scene.addSimpleText(ref,QFont('Segoe UI' if sys.platform == 'win32' else '',9)); text.setPos(part.x,part.y)
                         text.setFlag(QGraphicsItem.ItemIgnoresTransformations); text.setData(0,ref); text.setZValue(4)
+                        center = text.boundingRect().center()
+                        text.setTransform(QTransform().translate(-center.x(),-center.y()))
             no_geometry = sum(o == 'No body geometry' for o in origins.values()); fallback = sum(o != 'Size database' for o in origins.values())
             total_parts = sum(len(g) for g in groups)
             visible_parts = sum(len(g) for i,g in enumerate(groups) if selected_group < 0 or i == selected_group)
