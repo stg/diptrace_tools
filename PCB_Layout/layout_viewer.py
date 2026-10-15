@@ -208,6 +208,7 @@ class Viewer(QMainWindow):
         super().__init__(); self.resize(1440,850)
         self.board = None; self.recipe = None; self.recipe_path = None; self.saved = ''
         self.selected = ''; self.display_board = None; self.worker = None; self.preview_board = None
+        self.pending_output = None
         self.preview_groups = None; self.preview_key = ''; self.preview_error = ''; self.closing = False
         self.sizes = load_sizes()
         try:
@@ -303,7 +304,10 @@ class Viewer(QMainWindow):
         rep.addRow(self.arrangements)
         rep.addRow(self.layers_panel)
         self.rep_note = QLabel(); self.rep_note.setWordWrap(True); rep.addRow(self.rep_note)
-        self.export_button = QPushButton('Save replicated PCB as…'); self.export_button.clicked.connect(self.export); self.export_button.setEnabled(False); rep.addRow(self.export_button)
+        row = QHBoxLayout(); row.addWidget(QLabel('Replicated:'))
+        self.export_button = QPushButton('Save'); self.export_button.clicked.connect(self.export); self.export_button.setEnabled(False); row.addWidget(self.export_button)
+        self.export_as_button = QPushButton('Save as…'); self.export_as_button.clicked.connect(self.export_as); self.export_as_button.setEnabled(False); row.addWidget(self.export_as_button)
+        rep.addRow(row)
         self.rep_panel.hide(); side.addWidget(self.rep_panel)
         side.addStretch()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(sidebar); scroll.setMinimumWidth(290)
@@ -323,8 +327,10 @@ class Viewer(QMainWindow):
         action(file,'Open PCB / recipe…',self.open_dialog,'Ctrl+O')
         self.recent_menu = file.addMenu('Recent files'); self.recent_menu.aboutToShow.connect(self.recent)
         action(file,'Reload',self.reload,'Ctrl+R'); file.addSeparator()
-        action(file,'Save recipe',self.save,'Ctrl+S'); action(file,'Save recipe as…',self.save_as,'Ctrl+Shift+S')
-        action(file,'Save replicated PCB as…',self.export); file.addSeparator(); action(file,'Exit',self.close,'Alt+F4')
+        action(file,'Save recipe',self.save); action(file,'Save recipe as…',self.save_as)
+        replicated = file.addMenu('Replicated PCB')
+        action(replicated,'Save',self.export,'Ctrl+S'); action(replicated,'Save as…',self.export_as,'Ctrl+Shift+S')
+        file.addSeparator(); action(file,'Exit',self.close,'Alt+F4')
         edit = self.menuBar().addMenu('&Edit'); action(edit,'Add group…',self.add_group)
         action(edit,'Edit selected group…',self.edit_group); action(edit,'Remove selected group',self.remove_group)
         edit.addSeparator(); action(edit,'Copy selected RefDes',self.copy_selected,'Ctrl+C')
@@ -383,12 +389,17 @@ class Viewer(QMainWindow):
                 for i,group in enumerate(recipe['groups']):
                     group['refs'] = parsed[i]; group.setdefault('name',f'Group {i+1}')
                 recipe_path = path.resolve()
+                output = recipe.get('replicated_pcb')
+                if output:
+                    output = Path(output)
+                    recipe['replicated_pcb'] = str((output if output.is_absolute() else recipe_path.parent/output).resolve())
             else:
                 board = Board(path); recipe = default_recipe(board); recipe_path = None
             self.board,self.recipe,self.recipe_path = board,recipe,recipe_path
             migrate_view(recipe['view'])
             migrate_replication(recipe,board)
             self.preview_board = None; self.preview_key = ''; self.selected = ''; self.preview_error = ''
+            self.pending_output = None
             self.saved = json.dumps(recipe,sort_keys=True) if recipe_path else ''
             self.title()
             self.populate(); self.remember(path); self.refresh_display(); self.fit()
@@ -446,6 +457,7 @@ class Viewer(QMainWindow):
         finally:
             self.loading = False
         self.update_controls()
+        self.export_button.setEnabled(True); self.export_as_button.setEnabled(True)
 
     def update_controls(self):
         for box in self.layer_widgets.values():
@@ -464,6 +476,7 @@ class Viewer(QMainWindow):
         self.rep_action.setChecked(opened) if hasattr(self,'rep_action') else None
         self.preferences['replication_open'] = opened
         if not opened and self.preview.isChecked():
+            self.pending_output = None
             self.scope_buttons['All'].setChecked(True)
         self.change()
 
@@ -519,13 +532,13 @@ class Viewer(QMainWindow):
     def refresh_display(self):
         if not self.board:
             return
-        self.export_button.setEnabled(False)
         if not self.preview.isChecked():
+            self.pending_output = None
             if self.worker:
                 self.worker.requestInterruption()
             self.redraw(); return
         if self.preview_board is not None and self.preview_key == self.key():
-            self.redraw(); self.export_button.setEnabled(True); return
+            self.redraw(); return
         if self.worker:
             if self.worker.key != self.key():
                 self.worker.requestInterruption()
@@ -552,11 +565,15 @@ class Viewer(QMainWindow):
         if self.closing:
             self.close(); return
         if self.preview_error:
+            self.pending_output = None
             self.canvas.scene().clear(); self.body_items = {}; self.canvas.body_items = self.body_items
             self.summary.setText(self.preview_error); self.inspector.setText('Correct the replication settings to preview.'); return
         self.refresh_display()
         if self.preview_key == self.key():
             self.fit()
+            if self.pending_output is not None:
+                output = self.pending_output; self.pending_output = None
+                self.save_replicated_to(output)
 
     def redraw(self,*args):
         if not self.board:
@@ -687,7 +704,7 @@ class Viewer(QMainWindow):
             if not scene.items():
                 self.summary.setText('No parts in the selected display group.')
         except Exception as error:
-            self.summary.setText(str(error)); self.export_button.setEnabled(False)
+            self.summary.setText(str(error))
 
     def fit(self):
         if not self.canvas.scene().items():
@@ -794,6 +811,11 @@ class Viewer(QMainWindow):
                 data['pcb'] = os.path.relpath(self.board.path,self.recipe_path.parent)
             except ValueError:
                 data['pcb'] = str(self.board.path)  # Different Windows drive.
+            if data.get('replicated_pcb'):
+                try:
+                    data['replicated_pcb'] = os.path.relpath(data['replicated_pcb'],self.recipe_path.parent)
+                except ValueError:
+                    pass
             write_json(self.recipe_path,data); self.saved = json.dumps(self.recipe,sort_keys=True); self.title(); self.remember(self.recipe_path); return True
         except Exception as error:
             self.error(error); return False
@@ -832,39 +854,50 @@ class Viewer(QMainWindow):
             except Exception as error:
                 self.error(error)
 
-    def export(self):
+    def export_as(self):
+        self.export(save_as=True)
+
+    def export(self,save_as=False):
         if not self.recipe:
             return
+        filename = self.recipe.get('replicated_pcb')
+        if save_as or not filename:
+            proposed = filename or self.board.path.with_name(self.board.path.stem+'_replicated.dipxml')
+            filename,_ = QFileDialog.getSaveFileName(self,'Save replicated PCB as',str(proposed),'DipTrace PCB XML (*.dipxml)')
+            if not filename:
+                return
+        output = Path(filename).resolve()
+        if output.suffix.casefold() != '.dipxml':
+            output = output.with_name(output.name+'.dipxml')
+        if self.preview_board is not None and self.preview_key == self.key():
+            self.save_replicated_to(output); return
         if not self.rep_toggle.isChecked():
             self.rep_toggle.setChecked(True)
-        if not self.preview.isChecked() or self.preview_board is None or self.preview_key != self.key():
-            self.preview.setChecked(True); self.refresh_display(); self.statusBar().showMessage('Review the preview, then choose Save replicated PCB as…',6000); return
-        filename,_ = QFileDialog.getSaveFileName(self,'Save replicated PCB as',str(self.board.path.with_name(self.board.path.stem+'_replicated.dipxml')),'DipTrace PCB XML (*.dipxml)')
-        if not filename:
-            return
+        self.pending_output = output
+        self.preview.setChecked(True); self.refresh_display()
+
+    def save_replicated_to(self,output):
         try:
             if self.board.path.read_bytes() != self.board.data:
                 raise ValueError('The source PCB changed on disk. Reload before replicating.')
-            output = Path(filename).resolve()
-            if output.suffix.casefold() != '.dipxml':
-                output = output.with_name(output.name+'.dipxml')
             data = ET.tostring(self.preview_board.root,encoding='utf-8',xml_declaration=True)
             if output == self.board.path:
                 backup = output.with_name(output.name+'.'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.bak'); backup.write_bytes(self.board.data)
             temp = output.with_name(output.name+'.tmp'); temp.write_bytes(data); temp.replace(output)
-            old_groups = self.preview_groups; old_source = old_groups[0]['refs']; offsets = dict(self.recipe['rotation_offsets'])
-            if self.recipe['replication']['mode'] == 'Create copies':
-                for group in old_groups[1:]:
-                    for a,b in zip(old_source,group['refs']):
-                        if a in offsets:
-                            offsets[b] = offsets[a]
-            self.board = Board(output); self.recipe['pcb'] = str(output); self.recipe['groups'] = old_groups; self.recipe['rotation_offsets'] = offsets
-            source_index = 0 if self.recipe['replication']['mode'] == 'Create copies' else self.recipe['replication']['source']
-            self.recipe['view']['preview'] = False; self.recipe['replication'].update(mode='Arrange existing groups',source=source_index)
-            self.preview_board = None; self.preview_key = ''; self.populate(); self.refresh_display(); self.fit(); self.title()
-            # The filled groups are part of the recipe and immediately reusable.
-            self.save()
-            self.statusBar().showMessage('PCB saved. Re-import the XML in DipTrace and run its checks.',10000)
+            self.recipe['replicated_pcb'] = str(output)
+            if output == self.board.path:
+                old_groups = self.preview_groups; old_source = old_groups[0]['refs']; offsets = dict(self.recipe['rotation_offsets'])
+                if self.recipe['replication']['mode'] == 'Create copies':
+                    for group in old_groups[1:]:
+                        for a,b in zip(old_source,group['refs']):
+                            if a in offsets:
+                                offsets[b] = offsets[a]
+                self.board = Board(output); self.recipe['pcb'] = str(output); self.recipe['groups'] = old_groups; self.recipe['rotation_offsets'] = offsets
+                source_index = 0 if self.recipe['replication']['mode'] == 'Create copies' else self.recipe['replication']['source']
+                self.recipe['view']['preview'] = False; self.recipe['replication'].update(mode='Arrange existing groups',source=source_index)
+                self.preview_board = None; self.preview_key = ''; self.populate(); self.refresh_display(); self.fit()
+            if self.save():
+                self.statusBar().showMessage('Replicated PCB saved. Re-import the XML in DipTrace and run its checks.',10000)
         except Exception as error:
             self.error(error)
 

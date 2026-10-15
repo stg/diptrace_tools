@@ -83,11 +83,18 @@ footprint pads always accompany a copied part. Preview shows the routing
 selected for replication, subject to the viewing checkboxes.
 Source/All is a display scope, not a limit on the number of copies.
 
-Save replicated PCB as writes the previewed PCB XML. Generated group lists
-are filled into the recipe, which then opens the resulting PCB for further
-edits. Save recipe as can retain another recipe for a different study. The
-input PCB is unchanged unless you explicitly choose it as the output; that
-case creates a timestamped backup. Re-import the output into DipTrace and
+Replicated: Save (Ctrl+S) calculates the current replication and writes PCB
+XML. The first save asks for an output filename, which is stored in the
+recipe; later saves reuse it. Save as (Ctrl+Shift+S) chooses another output.
+Preview is optional before saving. Save recipe / Save recipe as in File save
+the study settings independently.
+
+A separate output leaves the original PCB loaded. Saving over the input
+creates a timestamped backup and automatically refreshes the loaded board.
+Generated groups are then filled into the recipe and the action becomes
+Arrange existing groups, so subsequent saves update them instead of adding
+copies again. Save recipe as can retain another recipe for a different study.
+Re-import the output into DipTrace and
 run its checks. External routing remains in its old position and may need
 rerouting after existing parts move. Board outlines, copper pours and other
 board graphics are retained but are not repeated with a group.

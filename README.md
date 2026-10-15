@@ -40,7 +40,7 @@ Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor
 
 Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a DipTrace PCB XML, choose a recipe JSON filename and add groups of RefDes. Replication controls stay folded away for ordinary viewing. **Help → How to use** explains body sizes, internal routing and export.
 
-<img src="pcb_layout_screen.png" alt="PCB_Layout" width="720">
+<img src="pcb_layout_screen.png" alt="PCB_Layout" width="720" height="455">
 
 The central [component_sizes.json](PCB_Layout/component_sizes.json) starts with 0402 (1.05 × 0.55 mm), SOT23 (3.05 × 1.4 mm, 90° correction), and 0805 (2.2 × 1.4 mm) body rectangles from the reference viewer. Right-click a part to define a pattern, name, or combined match. Priority is **pattern < name < pattern + name**. Bodies are centered on the footprint origin, with optional additional X/Y offsets. The initial body gap is 0.2 mm; dimensions and gap can be changed. These are body checks, excluding pads and leads. Outline/silkscreen fallback checks are estimates.
 

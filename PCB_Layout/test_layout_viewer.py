@@ -36,6 +36,14 @@ class ViewerTests(unittest.TestCase):
         self.window.timer.stop(); self.window.saved = json.dumps(self.window.recipe,sort_keys=True) if self.window.recipe else ''
         self.window.close(); self.settings.stop(); self.temp.cleanup()
 
+    def wait_for_replication(self):
+        deadline = time.monotonic()+8
+        while self.window.worker and time.monotonic() < deadline:
+            self.app.processEvents(); time.sleep(.005)
+        self.app.processEvents(); self.window.timer.stop()
+        self.assertIsNone(self.window.worker)
+        self.assertFalse(self.window.preview_error,self.window.preview_error)
+
     def test_xml_save_as_and_recipe_round_trip(self):
         recipe = self.root/'study.json'
         with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(recipe),'')):
@@ -55,19 +63,85 @@ class ViewerTests(unittest.TestCase):
         recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
         recipe['view'].update(tracks=True,vias=True); recipe_path = self.root/'study.json'; write_json(recipe_path,recipe)
         self.window.open_path(recipe_path,ask=False); self.window.rep_toggle.setChecked(True); self.window.preview.setChecked(True)
-        self.window.refresh_display(); deadline = time.monotonic()+8
-        while self.window.worker and time.monotonic() < deadline:
-            self.app.processEvents(); time.sleep(.005)
-        self.app.processEvents(); self.window.timer.stop()
+        self.window.refresh_display(); self.wait_for_replication()
         self.assertIsNone(self.window.worker); self.assertIsNotNone(self.window.preview_board,self.window.preview_error)
         expected = len(self.window.preview_board.parts); original = self.source.read_bytes(); output = self.root/'replicated.dipxml'
         with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')):
             self.window.export()
         self.assertFalse(self.errors,self.errors); self.assertEqual(self.source.read_bytes(),original)
         self.assertEqual(len(Board(output).parts),expected)
-        saved = json.loads(recipe_path.read_text()); self.assertEqual(len(saved['groups']),2)
-        self.assertEqual(saved['replication']['mode'],'Arrange existing groups'); self.assertFalse(saved['view']['preview'])
-        self.window.open_path(recipe_path,ask=False); self.assertEqual(self.window.board.path,output)
+        saved = json.loads(recipe_path.read_text()); self.assertEqual(len(saved['groups']),1)
+        self.assertEqual(saved['replication']['mode'],'Create copies')
+        self.assertEqual(saved['replicated_pcb'],'replicated.dipxml')
+        self.window.open_path(recipe_path,ask=False); self.assertEqual(self.window.board.path,self.source)
+        self.assertEqual(self.window.recipe['replicated_pcb'],str(output))
+
+    def test_replicated_save_builds_latest_and_remembers_filename(self):
+        recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.window.show(); self.window.activateWindow(); self.window.canvas.setFocus(); self.app.processEvents()
+        output = self.root/'replicated.dipxml'
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')) as choose:
+            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier)
+            self.wait_for_replication(); choose.assert_called_once()
+        self.assertTrue(output.exists()); self.assertEqual(self.window.board.path,self.source)
+        self.assertEqual(json.loads(path.read_text())['replicated_pcb'],'replicated.dipxml')
+        self.window.inputs['dx'].setValue(9)
+        with patch.object(ui.QFileDialog,'getSaveFileName',side_effect=AssertionError('Save asked again')):
+            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier)
+            self.wait_for_replication()
+        saved_board = Board(output)
+        copied = self.window.preview_groups[1]['refs']
+        self.assertEqual([saved_board.parts[r].x for r in copied],[9,11])
+        other = self.root/'other.dipxml'
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(other),'')) as choose:
+            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier|Qt.ShiftModifier)
+            self.wait_for_replication(); choose.assert_called_once()
+        self.assertTrue(other.exists()); self.assertEqual(json.loads(path.read_text())['replicated_pcb'],'other.dipxml')
+        self.assertFalse(self.errors,self.errors)
+
+    def test_in_place_save_refreshes_and_repeated_save_does_not_add_parts(self):
+        recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        recipe['replicated_pcb'] = str(self.source)
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        original = self.source.read_bytes()
+        with patch.object(ui.QFileDialog,'getSaveFileName',side_effect=AssertionError('Remembered filename prompted')):
+            self.window.export(); self.wait_for_replication()
+        saved_board = Board(self.source); count = len(saved_board.parts)
+        self.assertEqual(self.window.board.data,self.source.read_bytes()); self.assertNotEqual(self.window.board.data,original)
+        self.assertEqual(len(self.window.recipe['groups']),2)
+        self.assertEqual(self.window.recipe['replication']['mode'],'Arrange existing groups')
+        self.assertFalse(self.window.preview.isChecked()); self.assertEqual(len(self.window.body_items),4)
+        backups = list(self.root.glob('board.dipxml.*.bak'))
+        self.assertEqual(len(backups),1); self.assertEqual(backups[0].read_bytes(),original)
+        with patch.object(ui.QFileDialog,'getSaveFileName',side_effect=AssertionError('Remembered filename prompted')):
+            self.window.export(); self.wait_for_replication()
+        self.assertEqual(len(Board(self.source).parts),count)
+        self.assertFalse(self.errors,self.errors)
+
+    def test_replicated_output_path_survives_recipe_save_as(self):
+        recipe = default_recipe(Board(self.source)); recipe['replicated_pcb'] = 'replicated.dipxml'
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        folder = self.root/'nested'; folder.mkdir(); other = folder/'study.json'
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(other),'')):
+            self.assertTrue(self.window.save_as())
+        self.window.open_path(other,ask=False)
+        self.assertEqual(self.window.recipe['replicated_pcb'],str(self.root/'replicated.dipxml'))
+
+    def test_failed_replication_does_not_write_or_remember_output(self):
+        recipe = default_recipe(Board(self.source))
+        recipe['groups'] = [{'name':'Source','refs':['R1','R2']},{'name':'Target','refs':['R3']}]
+        recipe['replication']['mode'] = 'Arrange existing groups'
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        output = self.root/'invalid.dipxml'
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')):
+            self.window.export()
+        deadline = time.monotonic()+8
+        while self.window.worker and time.monotonic() < deadline:
+            self.app.processEvents(); time.sleep(.005)
+        self.window.timer.stop(); self.assertIsNone(self.window.worker)
+        self.assertTrue(self.window.preview_error); self.assertIsNone(self.window.pending_output)
+        self.assertFalse(output.exists()); self.assertNotIn('replicated_pcb',json.loads(path.read_text()))
 
     def test_existing_recipe_ignores_new_defaults(self):
         recipe = default_recipe(Board(self.source)); path = self.root/'study.json'; write_json(path,recipe)
