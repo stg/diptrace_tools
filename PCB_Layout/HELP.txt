@@ -1,8 +1,12 @@
 PCB Layout — How to use
 =======================
 
-Inspect compact placement and repeat complex placement/routing edits across
-groups of parts. Open a DipTrace PCB XML export (.dipxml), then choose a JSON
+Inspect placement feasibility using custom component body sizes and a
+configurable minimum placement gap. Replicate complex patterns across a PCB:
+edit one group, then automatically generate or update the rest, including
+routing and vias.
+
+Open a DipTrace PCB XML export (.dipxml), then choose a JSON
 filename for your layout recipe. You can reopen either file. Different recipe
 JSON files can refer to the same PCB and hold different replication patterns.
 

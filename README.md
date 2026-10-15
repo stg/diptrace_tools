@@ -8,7 +8,7 @@ Three desktop tools for reusing DipTrace designs, preparing assembly orders and 
 
 **JLCPCB_BOM** helps create, maintain, verify and back-annotate JLCPCB BOMs. It connects schematic data, editable project JSON and JLCPCB workbooks, so changes can be carried between design and ordering stages instead of re-entered. Schematic fields can be brought into JSON, JLCPCB selections can be read back into it, and edited Name/Value fields can be back-annotated into DipTrace.
 
-**PCB_Layout** helps judge the feasibility of compact placement and repeatedly apply complex placement and routing edits across circuit groups. It makes repeated linear, grid and rotational arrangements practical to preview and update when doing the same work directly in DipTrace would be difficult.
+**PCB_Layout** helps inspect placement feasibility using custom component body sizes and a configurable minimum placement gap. It also replicates complex patterns across a PCB: edit one group, then automatically generate or update the rest, including routing and vias.
 
 ## Part_DB
 
@@ -34,8 +34,8 @@ Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor
 
 ## PCB_Layout
 
-- **See whether a compact arrangement has room to assemble.** Compare colored groups using actual body dimensions, exact body-gap checks, and component outline or silkscreen fallbacks.
-- **Repeat complex circuit edits as one operation.** Create fresh copies or update existing groups, preserving destination nets and limiting routing to internal connections.
+- **Check whether a placement has room to assemble.** Use custom body sizes and a minimum placement gap to reveal crowded parts, with component outline or silkscreen fallbacks.
+- **Edit one group and generate or update the rest.** Replicate complex placement patterns together with internal routing and vias, preserving destination nets when updating existing groups.
 - **Explore arrangements without losing the current design.** Preview linear, grid or rotational placement and keep multiple reusable JSON recipes for one PCB.
 
 Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a DipTrace PCB XML, choose a recipe JSON filename and add groups of RefDes. Replication controls stay folded away for ordinary viewing. **Help → How to use** explains body sizes, internal routing and export.
