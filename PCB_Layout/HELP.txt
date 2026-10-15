@@ -14,12 +14,17 @@ view; clearance checks still include all groups in the current selection.
 
 Wheel to zoom, drag to pan, and Fit to frame the selection. Click a part to
 inspect it. Labels, Pads, Tracks and Vias can be shown independently; copper
-is off by default. When enabled, choose its layers and whether routing is
-shown for the source only or all groups. Current PCB always uses actual PCB
-content, not an imagined repetition of the source.
+is off by default. Source and All show current PCB routing for the source
+or all groups. Preview shows the proposed placement and routing together.
+
+The top Layer selector emphasizes one copper layer. Other layers are drawn
+as complete layers at one-third opacity. Keys 1–9 select available layers;
+Page Up/Down move between them without wrapping. These shortcuts leave text
+entry alone. This selector affects rendering only, not what is copied.
 
 Red means a same-side body gap is below the configured minimum (initially
-0.2 mm). Tools -> Settings changes the gap and viewing orientation. Pads and
+0.2 mm). Minimum gap and Mirror view are on the main toolbar. Normal XY
+orientation is the default; Mirror view flips it horizontally. Pads and
 leads are excluded from body clearance. This checks the selected placement,
 not all manufacturing or electrical constraints of the board.
 
@@ -27,7 +32,10 @@ Body dimensions
 ---------------
 Right-click a part -> Define body size. Match a pattern, a component Name,
 or both, and enter body width, height and an orientation correction in mm
-and degrees. Priority is pattern, then name, then pattern + name. The most
+and degrees. The footprint origin is local (0, 0); optional body X/Y offsets
+are added to it before the part's mirroring and rotation. Zero offsets keep
+the body centered on the footprint origin. Priority is pattern, then name,
+then pattern + name. The most
 recent entry wins within the same priority. Entries are shared by recipes.
 Removing the current match reveals the next matching entry, then fallback.
 
@@ -41,7 +49,11 @@ correction; it does not rotate the actual part in the exported PCB.
 Replicate an edit
 -----------------
 Open the Replication fold-out (also available under Tools).
-Select the source group, action and arrangement, then check Preview.
+Select the source group, action and arrangement, then select Preview in
+the Show routing for selector. Source and All show current PCB content; Preview
+shows the proposed bodies and routing together. This selector is also usable
+with copper hidden when you only want to preview placement. Preview is
+disabled while the Replication section is folded away.
 
 Create copies: specify the total instances, including the source. A grid
 uses columns × rows instead of a separate count. With no groups, the whole
@@ -60,12 +72,16 @@ and rows. Rotational uses a center and angle step, or equal spacing over 360°.
 For existing groups, list order defines their arrangement positions and the
 source group remains anchored at its current position.
 
-The same internal-routing selection drives display and export: paths between
+Preview and export use the same internal-routing selection: paths between
 pads in a group, including intervening vias, without external branches or
-dangling loops. Layer checkboxes also limit copied copper. Tracks through
-vias require Vias enabled. Vias alone can be copied as standalone static vias.
-Pads is a display option; the footprint pads always accompany a copied part.
-Source only/All is a display scope, not a limit on the number of copies.
+dangling loops. What to replicate, below the arrangement settings, selects
+Tracks, Vias and the allowed routing layers. Placement is always replicated.
+These choices are independent of the main toolbar's viewing checkboxes.
+Tracks through vias require Vias selected for replication. Vias alone can
+be copied as standalone static vias. The main toolbar only controls viewing;
+footprint pads always accompany a copied part. Preview shows the routing
+selected for replication, subject to the viewing checkboxes.
+Source/All is a display scope, not a limit on the number of copies.
 
 Save replicated PCB as writes the previewed PCB XML. Generated group lists
 are filled into the recipe, which then opens the resulting PCB for further

@@ -11,9 +11,9 @@ sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from Shared.platform_helpers import open_file
 from layout_core import (APP_DIR, SIZES_PATH, SETTINGS_PATH, DEFAULTS_PATH, Board, default_recipe,
                          group_refs, refs, load_sizes, size_match, polygon_gap,
-                         replicate, intervals, write_json)
+                         replicate, intervals, write_json, migrate_view, migrate_replication)
 from lxml import etree as ET
-from PySide6.QtCore import Qt, Signal, QThread, QTimer, QByteArray, QRectF
+from PySide6.QtCore import Qt, Signal, QThread, QTimer, QByteArray, QRectF, QEvent
 from PySide6.QtGui import QAction, QColor, QPen, QBrush, QPainterPath, QPolygonF, QTransform, QFont, QKeySequence, QPainter
 from PySide6.QtCore import QPointF
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -21,11 +21,13 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QDoubleSpinBox, QListWidget, QListWidgetItem, QGraphicsView, QGraphicsScene,
     QGraphicsItem, QSplitter, QFileDialog, QMessageBox, QMenu, QDialog,
     QDialogButtonBox, QLineEdit, QPlainTextEdit, QGroupBox, QStackedWidget, QProgressBar,
-    QScrollArea, QInputDialog)
+    QScrollArea, QInputDialog, QRadioButton, QButtonGroup, QTextEdit, QAbstractSpinBox,
+    QGraphicsItemGroup, QGraphicsOpacityEffect)
 
 
 GROUP_COLORS = ('#9dd9f3', '#b6e3a4', '#f4cf8c', '#d0b8ed',
                 '#f5b5c6', '#98dfd3', '#c5d2f2', '#e5d99a')
+COPPER_COLOR = '#d6aa43'
 
 
 def color(index):
@@ -51,13 +53,24 @@ class Canvas(QGraphicsView):
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setBackgroundBrush(QColor('#fafafa'))
+        self.body_items = {}
 
     def ref_at(self,pos):
-        item = self.itemAt(pos)
-        while item:
+        scene_pos = self.mapToScene(pos)
+        for ref,item in reversed(list(self.body_items.items())):
+            point = item.mapFromScene(scene_pos)
+            if hasattr(item,'polygon'):
+                inside = item.polygon().containsPoint(point,Qt.OddEvenFill)
+            else:
+                rect = item.rect()
+                inside = ((point.x()-rect.center().x())/(rect.width()/2))**2+((point.y()-rect.center().y())/(rect.height()/2))**2 <= 1
+            if inside:
+                return ref
+        for item in self.items(pos):
+            if item.data(1) == 'body':
+                continue
             if item.data(0):
                 return item.data(0)
-            item = item.parentItem()
         return ''
 
     def mousePressEvent(self,event):
@@ -113,7 +126,7 @@ class GroupDialog(QDialog):
 
 class SizeDialog(QDialog):
     def __init__(self, part, data, parent):
-        super().__init__(parent); self.setWindowTitle('Component body size'); self.resize(430,280)
+        super().__init__(parent); self.setWindowTitle('Component body size'); self.resize(470,390)
         self.part,self.data = part,data
         self.index,self.entry = size_match(part,data)
         form = QFormLayout(self)
@@ -124,9 +137,15 @@ class SizeDialog(QDialog):
         self.width = spin((self.entry or {}).get('width_mm',1),.001,10000)
         self.height = spin((self.entry or {}).get('height_mm',1),.001,10000)
         self.rotation = spin((self.entry or {}).get('rotation_deg',0),-360,360,2)
+        self.origin_x = spin((self.entry or {}).get('origin_x_mm',0),-10000,10000,6)
+        self.origin_y = spin((self.entry or {}).get('origin_y_mm',0),-10000,10000,6)
         form.addRow('Match',self.scope); form.addRow('Pattern',self.pattern); form.addRow('Name',self.name)
         form.addRow('Body width (mm)',self.width); form.addRow('Body height (mm)',self.height)
         form.addRow('Body rotation offset (°)',self.rotation)
+        form.addRow('Body offset X (mm)',self.origin_x); form.addRow('Body offset Y (mm)',self.origin_y)
+        use_origin = QPushButton('Reset body offset'); use_origin.clicked.connect(self.use_footprint_origin)
+        form.addRow(use_origin)
+        form.addRow(QLabel('Footprint origin is (0, 0). Body offsets are added\nbefore component mirroring/rotation.'))
         form.addRow(QLabel('Priority: pattern < name < pattern + name.\nEntries are shared by every layout recipe.'))
         buttons = QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
         remove = buttons.addButton('Remove current match',QDialogButtonBox.DestructiveRole)
@@ -138,8 +157,12 @@ class SizeDialog(QDialog):
         self.pattern.setEnabled(self.scope.currentIndex() != 1)
         self.name.setEnabled(self.scope.currentIndex() != 0)
 
+    def use_footprint_origin(self):
+        self.origin_x.setValue(0); self.origin_y.setValue(0)
+
     def save(self):
-        entry = {'width_mm':self.width.value(),'height_mm':self.height.value(),'rotation_deg':self.rotation.value()}
+        entry = {'width_mm':self.width.value(),'height_mm':self.height.value(),'rotation_deg':self.rotation.value(),
+                 'origin_x_mm':self.origin_x.value(),'origin_y_mm':self.origin_y.value()}
         if self.scope.currentIndex() != 1:
             entry['pattern'] = self.pattern.text().strip()
         if self.scope.currentIndex() != 0:
@@ -194,6 +217,7 @@ class Viewer(QMainWindow):
         self.preferences.setdefault('schema_version',1)
         self.timer = QTimer(self); self.timer.setSingleShot(True); self.timer.timeout.connect(self.refresh_display)
         self.build_ui(); self.create_menus(); self.title()
+        QApplication.instance().installEventFilter(self)
         if self.preferences.get('geometry'):
             self.restoreGeometry(QByteArray.fromHex(self.preferences['geometry'].encode()))
         if self.preferences.get('splitter'):
@@ -208,12 +232,31 @@ class Viewer(QMainWindow):
         fit = QPushButton('Fit'); fit.clicked.connect(self.fit); toolbar.addWidget(fit)
         self.show_group = QComboBox(); self.show_group.addItem('All groups'); self.show_group.currentIndexChanged.connect(self.choose_group)
         toolbar.addWidget(self.show_group)
+        toolbar.addWidget(QLabel('Layer'))
+        self.layer_combo = QComboBox(); self.layer_combo.setMinimumContentsLength(10)
+        self.layer_combo.setToolTip('Rendering only. Selected-layer copper is opaque; other layers are composited at 1/3 opacity. Keys 1–9 or Page Up/Down switch layers outside text fields.')
+        self.layer_combo.currentIndexChanged.connect(self.change); toolbar.addWidget(self.layer_combo)
         self.checks = {}
         for key,label in [('labels','Labels'),('pads','Pads'),('tracks','Tracks'),('vias','Vias')]:
             box = QCheckBox(label); box.setChecked(key == 'labels'); box.toggled.connect(self.change)
+            box.setToolTip('Display only; replication options are in the Replication panel.')
             self.checks[key] = box; toolbar.addWidget(box)
-        toolbar.addStretch(); self.preview = QCheckBox('Preview'); self.preview.hide(); self.preview.toggled.connect(self.change)
-        toolbar.addWidget(self.preview); outer.addLayout(toolbar)
+        toolbar.addSpacing(12); toolbar.addWidget(QLabel('Minimum gap'))
+        self.gap = spin(.2,0,100,3); self.gap.setSuffix(' mm'); self.gap.setSingleStep(.05); self.gap.setMaximumWidth(110); self.gap.setKeyboardTracking(False)
+        self.gap.setToolTip('Highlight bodies with a smaller gap; pads are excluded.')
+        self.gap.valueChanged.connect(self.change); toolbar.addWidget(self.gap)
+        self.mirror = QCheckBox('Mirror view'); self.mirror.setToolTip('Mirror the view horizontally; PCB coordinates stay unchanged.')
+        self.mirror.toggled.connect(self.change); toolbar.addWidget(self.mirror)
+        toolbar.addStretch()
+        toolbar.addWidget(QLabel('Show routing for'))
+        self.mode_group = QButtonGroup(self); self.scope_buttons = {}
+        for name in ('Source','All','Preview'):
+            button = QRadioButton(name); self.mode_group.addButton(button); self.scope_buttons[name] = button
+            button.toggled.connect(lambda checked:self.change() if checked else None); toolbar.addWidget(button)
+        self.scope_buttons['All'].setChecked(True)
+        self.preview = self.scope_buttons['Preview']
+        self.preview.setEnabled(False)
+        outer.addLayout(toolbar)
         self.splitter = QSplitter(); sidebar = QWidget(); side = QVBoxLayout(sidebar)
         side.addWidget(QLabel('Part groups'))
         self.group_list = QListWidget(); self.group_list.itemDoubleClicked.connect(lambda _:self.edit_group())
@@ -223,12 +266,16 @@ class Viewer(QMainWindow):
         for label,callback in [('Add…',self.add_group),('Edit…',self.edit_group),('Remove',self.remove_group)]:
             button = QPushButton(label); button.clicked.connect(callback); row.addWidget(button)
         side.addLayout(row)
-        self.layers_panel = QGroupBox('Internal copper'); layers_layout = QVBoxLayout(self.layers_panel)
-        row = QHBoxLayout(); row.addWidget(QLabel('Show routing for'))
-        self.scope = QComboBox(); self.scope.addItems(['All','Source only']); self.scope.currentTextChanged.connect(self.change); row.addWidget(self.scope)
-        layers_layout.addLayout(row); self.layer_widgets = {}; self.layers_form = QVBoxLayout(); layers_layout.addLayout(self.layers_form)
-        note = QLabel('Only connections between parts in a group.\nUnchecked layers are excluded from copies.'); note.setWordWrap(True); layers_layout.addWidget(note)
-        self.layers_panel.hide(); side.addWidget(self.layers_panel)
+        self.layers_panel = QGroupBox('What to replicate'); layers_layout = QVBoxLayout(self.layers_panel)
+        columns = QHBoxLayout(); types = QVBoxLayout(); self.copy_checks = {}
+        for key,label in [('tracks','Tracks'),('vias','Vias')]:
+            box = QCheckBox(label); box.setChecked(True); box.toggled.connect(self.change)
+            box.setToolTip('Include this routing in replication. Viewing controls above are independent.')
+            self.copy_checks[key] = box; types.addWidget(box)
+        types.addStretch(); columns.addLayout(types)
+        self.layer_widgets = {}; self.layers_form = QVBoxLayout(); columns.addLayout(self.layers_form)
+        layers_layout.addLayout(columns)
+        note = QLabel('Placement is always included. Routing is limited to connections within a group on the checked layers.'); note.setWordWrap(True); layers_layout.addWidget(note)
         self.rep_toggle = QToolButton(); self.rep_toggle.setText('Replication'); self.rep_toggle.setCheckable(True)
         self.rep_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); self.rep_toggle.setArrowType(Qt.RightArrow)
         self.rep_toggle.toggled.connect(self.toggle_replication); side.addWidget(self.rep_toggle)
@@ -252,6 +299,7 @@ class Viewer(QMainWindow):
                 self.auto_angle = QCheckBox('Evenly around 360°'); self.auto_angle.setChecked(True); self.auto_angle.toggled.connect(self.change); form.addRow(self.auto_angle)
             self.arrangements.addWidget(page)
         rep.addRow(self.arrangements)
+        rep.addRow(self.layers_panel)
         self.rep_note = QLabel(); self.rep_note.setWordWrap(True); rep.addRow(self.rep_note)
         self.export_button = QPushButton('Save replicated PCB as…'); self.export_button.clicked.connect(self.export); self.export_button.setEnabled(False); rep.addRow(self.export_button)
         self.rep_panel.hide(); side.addWidget(self.rep_panel)
@@ -282,7 +330,7 @@ class Viewer(QMainWindow):
         action(edit,'Fit',self.fit,'F'); action(edit,'Body rotation correction…',self.rotation_correction)
         tools = self.menuBar().addMenu('&Tools'); self.rep_action = action(tools,'Replication settings',lambda:self.rep_toggle.setChecked(not self.rep_toggle.isChecked()))
         self.rep_action.setCheckable(True); tools.addSeparator()
-        action(tools,'Settings…',self.settings_dialog); action(tools,'Open program settings JSON',lambda:self.open_local(SETTINGS_PATH))
+        action(tools,'Open program settings JSON',lambda:self.open_local(SETTINGS_PATH))
         action(tools,'Open recipe JSON',lambda:self.open_local(self.recipe_path) if self.recipe_path else self.save_as())
         action(tools,'Open new-recipe defaults',lambda:self.open_local(DEFAULTS_PATH))
         action(tools,'Open component sizes',lambda:self.open_local(SIZES_PATH)); action(tools,'Reload component sizes',self.reload_sizes)
@@ -336,6 +384,8 @@ class Viewer(QMainWindow):
             else:
                 board = Board(path); recipe = default_recipe(board); recipe_path = None
             self.board,self.recipe,self.recipe_path = board,recipe,recipe_path
+            migrate_view(recipe['view'])
+            migrate_replication(recipe,board)
             self.preview_board = None; self.preview_key = ''; self.selected = ''; self.preview_error = ''
             self.saved = json.dumps(recipe,sort_keys=True) if recipe_path else ''
             self.title()
@@ -364,18 +414,27 @@ class Viewer(QMainWindow):
             if not self.recipe['groups']:
                 self.group_list.addItem('No groups — whole PCB'); self.rep_fields['source'].addItem('Whole PCB')
             self.show_group.setCurrentIndex(self.recipe['view'].get('display_group',0))
+            self.layer_combo.clear()
+            for i,(key,label) in enumerate(self.board.layers.items()):
+                self.layer_combo.addItem(f'{i+1}: {label}' if i < 9 else label,key)
+            active = self.layer_combo.findData(self.recipe['view'].get('active_layer'))
+            self.layer_combo.setCurrentIndex(max(0,active))
             for key,box in self.checks.items():
                 box.setChecked(self.recipe['view'][key])
-            self.scope.setCurrentText(self.recipe['view']['routing_scope']); self.preview.setChecked(self.recipe['view']['preview'])
+            self.gap.setValue(self.recipe['clearance_mm']); self.mirror.setChecked(self.recipe['view']['mirror'])
+            mode = 'Preview' if self.recipe['view']['preview'] else 'Source' if self.recipe['view']['routing_scope'] in ('Source','Source only') else 'All'
+            self.scope_buttons[mode].setChecked(True)
             while self.layers_form.count():
                 item = self.layers_form.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
             self.layer_widgets = {}
             for key,label in self.board.layers.items():
-                box = QCheckBox(label); box.setChecked(key in self.recipe['view']['layers']); box.toggled.connect(self.change)
+                box = QCheckBox(label); box.setChecked(key in self.recipe['replication']['layers']); box.toggled.connect(self.change)
                 self.layer_widgets[key] = box; self.layers_form.addWidget(box)
             settings = self.recipe['replication']
+            for key,box in self.copy_checks.items():
+                box.setChecked(settings[key])
             for key,box in self.rep_fields.items():
                 box.setCurrentIndex(settings[key]) if key == 'source' else box.setCurrentText(settings[key])
             self.rep_count.setValue(settings['count']); self.auto_angle.setChecked(settings['automatic_angle'])
@@ -387,8 +446,10 @@ class Viewer(QMainWindow):
         self.update_controls()
 
     def update_controls(self):
-        self.layers_panel.setVisible(self.checks['tracks'].isChecked() or self.checks['vias'].isChecked())
+        for box in self.layer_widgets.values():
+            box.setEnabled(any(c.isChecked() for c in self.copy_checks.values()))
         self.arrangements.setCurrentIndex(self.rep_fields['layout'].currentIndex())
+        self.arrangements.setFixedHeight(self.arrangements.currentWidget().sizeHint().height())
         create = self.rep_fields['mode'].currentIndex() == 0
         grid = self.rep_fields['layout'].currentText() == 'Grid'
         self.count_label.setVisible(create and not grid); self.rep_count.setVisible(create and not grid)
@@ -397,26 +458,57 @@ class Viewer(QMainWindow):
 
     def toggle_replication(self,opened):
         self.rep_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow); self.rep_panel.setVisible(opened)
-        self.preview.setVisible(opened); self.rep_action.setChecked(opened) if hasattr(self,'rep_action') else None
+        self.preview.setEnabled(opened)
+        self.rep_action.setChecked(opened) if hasattr(self,'rep_action') else None
         self.preferences['replication_open'] = opened
         if not opened and self.preview.isChecked():
-            self.preview.setChecked(False)
+            self.scope_buttons['All'].setChecked(True)
         self.change()
 
     def change(self,*args):
         if not self.recipe or getattr(self,'loading',False):
             return
         view = self.recipe['view']
+        mirror_changed = view.get('mirror',False) != self.mirror.isChecked()
+        if mirror_changed:
+            view.pop('legacy_rotation_deg',None)
+        view['mirror'] = self.mirror.isChecked(); self.recipe['clearance_mm'] = self.gap.value()
+        view['active_layer'] = self.layer_combo.currentData()
         view.update({key:box.isChecked() for key,box in self.checks.items()})
-        view.update(preview=self.preview.isChecked(),routing_scope=self.scope.currentText(),layers=[key for key,box in self.layer_widgets.items() if box.isChecked()])
+        view.update(preview=self.preview.isChecked(),routing_scope='Source' if self.scope_buttons['Source'].isChecked() else 'All')
         settings = self.recipe['replication']
+        settings.update({key:box.isChecked() for key,box in self.copy_checks.items()})
+        settings['layers'] = [key for key,box in self.layer_widgets.items() if box.isChecked()]
         settings.update({key:box.currentIndex() if key == 'source' else box.currentText() for key,box in self.rep_fields.items()})
         settings.update(count=self.rep_count.value(),automatic_angle=self.auto_angle.isChecked())
         settings.update({key:box.value() for key,box in self.inputs.items()})
         self.update_controls(); self.title(); self.timer.start(180)
+        if self.preview.isChecked() and not self.rep_toggle.isChecked():
+            self.rep_toggle.setChecked(True)
+        if mirror_changed:
+            center = self.canvas.mapToScene(self.canvas.viewport().rect().center())
+            scale = abs(self.canvas.transform().m11())
+            self.canvas.setTransform(QTransform().scale((-1 if view['mirror'] else 1)*scale,-scale))
+            self.canvas.centerOn(center)
 
     def key(self):
-        return self.board.fingerprint+json.dumps({'groups':self.recipe['groups'],'replication':self.recipe['replication'],'copper':{k:self.recipe['view'][k] for k in ('tracks','vias','layers')}},sort_keys=True)
+        settings = {k:float(v) if type(v) in (int,float) else v for k,v in self.recipe['replication'].items()}
+        return self.board.fingerprint+json.dumps({'groups':self.recipe['groups'],'replication':settings},sort_keys=True)
+
+    def eventFilter(self,receiver,event):
+        if event.type() == QEvent.KeyPress and self.isActiveWindow() and QApplication.activePopupWidget() is None:
+            focus = QApplication.focusWidget()
+            editable = isinstance(focus,(QLineEdit,QPlainTextEdit,QTextEdit,QAbstractSpinBox)) or (isinstance(focus,QComboBox) and focus.isEditable())
+            if not editable and not event.modifiers() & (Qt.ControlModifier|Qt.AltModifier|Qt.MetaModifier|Qt.ShiftModifier):
+                key = event.key(); count = self.layer_combo.count(); index = self.layer_combo.currentIndex()
+                if count and Qt.Key_1 <= key <= Qt.Key_9:
+                    target = key-Qt.Key_1
+                    if target < count:
+                        self.layer_combo.setCurrentIndex(target); return True
+                elif count and key in (Qt.Key_PageUp,Qt.Key_PageDown):
+                    self.layer_combo.setCurrentIndex(max(0,min(count-1,index+(-1 if key == Qt.Key_PageUp else 1))))
+                    return True
+        return super().eventFilter(receiver,event)
 
     def choose_group(self,index):
         if self.recipe and not getattr(self,'loading',False):
@@ -433,7 +525,9 @@ class Viewer(QMainWindow):
         if self.preview_board is not None and self.preview_key == self.key():
             self.redraw(); self.export_button.setEnabled(True); return
         if self.worker:
-            self.worker.requestInterruption(); return
+            if self.worker.key != self.key():
+                self.worker.requestInterruption()
+            return
         self.preview_error = ''; self.progress.setRange(0,0); self.progress.show()
         self.summary.setText('Calculating replication preview…')
         self.worker = PreviewThread(self.board,deepcopy(self.recipe),self.key())
@@ -456,7 +550,8 @@ class Viewer(QMainWindow):
         if self.closing:
             self.close(); return
         if self.preview_error:
-            self.canvas.scene().clear(); self.summary.setText(self.preview_error); self.inspector.setText('Correct the replication settings to preview.'); return
+            self.canvas.scene().clear(); self.body_items = {}; self.canvas.body_items = self.body_items
+            self.summary.setText(self.preview_error); self.inspector.setText('Correct the replication settings to preview.'); return
         self.refresh_display()
         if self.preview_key == self.key():
             self.fit()
@@ -470,16 +565,22 @@ class Viewer(QMainWindow):
                 return
             board = self.preview_board if use_preview else self.board
             groups = [g['refs'] for g in self.preview_groups] if use_preview else group_refs(board,self.recipe)
-            if not use_preview and self.rep_toggle.isChecked() and self.recipe['replication']['mode'] == 'Create copies':
-                source = self.recipe['replication']['source']; groups = [groups[source]]
             names = [g['name'] for g in self.preview_groups] if use_preview else [g['name'] for g in self.recipe['groups']] or ['Whole PCB']
-            if not use_preview and self.rep_toggle.isChecked() and self.recipe['replication']['mode'] == 'Create copies':
-                names = [names[self.recipe['replication']['source']]]
             current = self.show_group.currentIndex()
             self.show_group.blockSignals(True); self.show_group.clear(); self.show_group.addItems(['All groups']+names)
             self.show_group.setCurrentIndex(max(0,min(current,len(names)))); self.show_group.blockSignals(False)
             self.display_board = board; self.display_groups = groups
             scene = self.canvas.scene(); scene.clear(); self.body_items = {}
+            self.canvas.body_items = self.body_items
+            copper_layers = {}
+            for layer in board.layers:
+                group_item = QGraphicsItemGroup(); scene.addItem(group_item)
+                active = layer == self.layer_combo.currentData()
+                group_item.setZValue(1 if active else 0)
+                if not active:
+                    effect = QGraphicsOpacityEffect(); effect.setOpacity(1/3)
+                    group_item.setGraphicsEffect(effect)
+                copper_layers[layer] = group_item
             geometries = {}; origins = {}; collisions = {}
             extra = dict(self.recipe['rotation_offsets'])
             if use_preview and self.recipe['replication']['mode'] == 'Create copies':
@@ -512,9 +613,9 @@ class Viewer(QMainWindow):
                     continue
                 tint = color(index)
                 source_group_index = 0 if len(groups) == 1 or (use_preview and self.recipe['replication']['mode'] == 'Create copies') else self.recipe['replication']['source']
-                draw_routes = self.scope.currentText() == 'All' or index == source_group_index
+                draw_routes = not self.scope_buttons['Source'].isChecked() or index == source_group_index
                 if draw_routes and (self.checks['tracks'].isChecked() or self.checks['vias'].isChecked()):
-                    route = board.replication_routing[index] if use_preview else board.routing(group,self.checks['tracks'].isChecked(),self.checks['vias'].isChecked(),set(self.recipe['view']['layers']))
+                    route = board.replication_routing[index] if use_preview else board.routing(group,True,True,set(board.layers))
                     if self.checks['tracks'].isChecked():
                         for key,edges in route.segments.items():
                             points = board.traces[key].findall('./Points/Point'); tracks_count += len(intervals(edges))
@@ -522,17 +623,26 @@ class Viewer(QMainWindow):
                                 p,q = points[i:i+2]
                                 path = QPainterPath(); path.moveTo(float(p.get('X'))*board.factor,float(p.get('Y'))*board.factor)
                                 path.lineTo(float(q.get('X'))*board.factor,float(q.get('Y'))*board.factor)
-                                pen = QPen(tint.darker(155)); pen.setWidthF(max(.03,float(q.get('Width',1))*board.factor))
-                                scene.addPath(path,pen).setZValue(-2)
+                                pen = QPen(QColor(COPPER_COLOR)); pen.setWidthF(max(.03,float(q.get('Width',1))*board.factor))
+                                pen.setCapStyle(Qt.RoundCap); pen.setJoinStyle(Qt.RoundJoin)
+                                track = scene.addPath(path,pen)
+                                track.setData(1,'track'); copper_layers[q.get('Lay')].addToGroup(track)
                     if self.checks['vias'].isChecked():
                         locations = []
                         for vid in route.vias:
-                            part = board.by_id[vid]; locations.append((part.x,part.y,board.via_sizes.get(part.element.get('ViaStyle'),.5)))
+                            part = board.by_id[vid]; style = part.element.get('ViaStyle')
+                            locations.append((part.x,part.y,board.via_sizes.get(style,.5),board.via_drills.get(style,0)))
                         for nid,tid,i in route.embedded:
                             p = board.traces[nid,tid].findall('./Points/Point')[i]
-                            locations.append((float(p.get('X'))*board.factor,float(p.get('Y'))*board.factor,board.via_sizes.get(p.get('ViaStyle'),.5)))
-                        for x,y,size in locations:
-                            scene.addEllipse(x-size/2,y-size/2,size,size,QPen(tint.darker(170),.025),QBrush(tint)).setZValue(-1)
+                            style = p.get('ViaStyle')
+                            locations.append((float(p.get('X'))*board.factor,float(p.get('Y'))*board.factor,board.via_sizes.get(style,.5),board.via_drills.get(style,0)))
+                        for x,y,size,drill in locations:
+                            for group_item in copper_layers.values():
+                                ring = scene.addEllipse(x-size/2,y-size/2,size,size,QPen(Qt.NoPen),QBrush(QColor(COPPER_COLOR)))
+                                ring.setData(1,'via'); group_item.addToGroup(ring)
+                            if drill > 0:
+                                hole = scene.addEllipse(x-drill/2,y-drill/2,drill,drill,QPen(Qt.NoPen),self.canvas.backgroundBrush())
+                                hole.setData(1,'drill'); hole.setZValue(2.5)
                         vias_count += len(locations)
                 for ref in group:
                     part = board.parts[ref]; paths,poly = geometries[ref]
@@ -548,16 +658,21 @@ class Viewer(QMainWindow):
                                     path.lineTo(*point)
                                 if closed:
                                     path.closeSubpath()
-                                child = scene.addPath(path,QPen(tint_body.darker(170),.025)); child.setData(0,ref); child.setZValue(1)
+                                child = scene.addPath(path,QPen(tint_body.darker(170),.025)); child.setData(0,ref); child.setZValue(3.1)
                     else:
                         body = scene.addEllipse(part.x-.25,part.y-.25,.5,.5,pen,QBrush(QColor('#ffcf75')))
-                    body.setData(0,ref); body.setZValue(0); self.body_items[ref] = body
+                    body.setData(0,ref); body.setData(1,'body'); body.setZValue(3); self.body_items[ref] = body
                     body.setToolTip(f'{ref} · {part.name}\n{part.pattern}\n{origins[ref]}\nX {part.x:.3f}, Y {part.y:.3f} mm')
                     if self.checks['pads'].isChecked():
                         for pid,points in board.pad_polygons(part):
-                            item = scene.addPolygon(QPolygonF([QPointF(*p) for p in points]),QPen(QColor('#8b6600'),.015),QBrush(QColor('#d6aa43'))); item.setData(0,ref); item.setZValue(2); item.setToolTip(f'{ref} pad {pid}')
+                            for layer in board.pad_layers(part,pid):
+                                if layer not in copper_layers:
+                                    continue
+                                item = scene.addPolygon(QPolygonF([QPointF(*p) for p in points]),QPen(Qt.NoPen),QBrush(QColor(COPPER_COLOR)))
+                                item.setData(0,ref); item.setData(1,'pad'); item.setToolTip(f'{ref} pad {pid}'); copper_layers[layer].addToGroup(item)
                     if self.checks['labels'].isChecked():
-                        text = scene.addSimpleText(ref,QFont('Segoe UI' if sys.platform == 'win32' else '',9)); text.setPos(part.x,part.y)
+                        anchor = ((min(x for x,y in poly)+max(x for x,y in poly))/2,(min(y for x,y in poly)+max(y for x,y in poly))/2) if poly else (part.x,part.y)
+                        text = scene.addSimpleText(ref,QFont('Segoe UI' if sys.platform == 'win32' else '',9)); text.setPos(*anchor)
                         text.setFlag(QGraphicsItem.ItemIgnoresTransformations); text.setData(0,ref); text.setZValue(4)
                         center = text.boundingRect().center()
                         text.setTransform(QTransform().translate(-center.x(),-center.y()))
@@ -576,8 +691,8 @@ class Viewer(QMainWindow):
         if not self.canvas.scene().items():
             return
         view = self.recipe['view'] if self.recipe else {}
-        sign = -1 if view.get('rotate_workspace',True) else 1
-        self.canvas.setTransform(QTransform().scale(sign,sign*(1 if view.get('y_down',True) else -1)))
+        legacy_sign = -1 if view.get('legacy_rotation_deg') == 180 else 1
+        self.canvas.setTransform(QTransform().scale((-1 if view.get('mirror',False) else 1)*legacy_sign,-legacy_sign))
         bounds = QRectF()
         for item in self.canvas.scene().items():
             if not item.flags() & QGraphicsItem.ItemIgnoresTransformations:
@@ -664,17 +779,6 @@ class Viewer(QMainWindow):
             group_refs(self.board,candidate); self.recipe = candidate; self.populate(); self.title(); self.refresh_display(); self.fit()
         except Exception as error:
             self.error(error)
-
-    def settings_dialog(self):
-        if not self.recipe:
-            return
-        dialog = QDialog(self); dialog.setWindowTitle('Settings'); form = QFormLayout(dialog)
-        gap = spin(self.recipe['clearance_mm'],0,100,3); form.addRow('Minimum body gap (mm)',gap)
-        down = QCheckBox('Y increases downward'); down.setChecked(self.recipe['view']['y_down']); form.addRow(down)
-        rotated = QCheckBox('Rotate workspace 180°'); rotated.setChecked(self.recipe['view']['rotate_workspace']); form.addRow(rotated)
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok|QDialogButtonBox.Cancel); buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); form.addRow(buttons)
-        if dialog.exec():
-            self.recipe['clearance_mm'] = gap.value(); self.recipe['view'].update(y_down=down.isChecked(),rotate_workspace=rotated.isChecked()); self.title(); self.redraw(); self.fit()
 
     def save(self):
         if not self.recipe:
@@ -776,6 +880,7 @@ class Viewer(QMainWindow):
             self.save_preferences()
         except Exception as error:
             self.error(error)
+        QApplication.instance().removeEventFilter(self)
         event.accept()
 
 

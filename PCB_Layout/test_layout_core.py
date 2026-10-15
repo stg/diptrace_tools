@@ -2,7 +2,7 @@ from copy import deepcopy
 import unittest
 from lxml import etree as ET
 from layout_core import (Board, default_recipe, group_refs, load_sizes, size_match,
-                         polygon_gap, terminal_paths, replicate, transform_for, transform_point)
+                         polygon_gap, terminal_paths, replicate, transform_for, transform_point, migrate_view, migrate_replication)
 
 
 def fixture():
@@ -130,7 +130,7 @@ class LayoutTests(unittest.TestCase):
         b = Board(data=ET.tostring(b.root)); route = b.routing(['R1','R2'],True,True,{'0','1'})
         self.assertEqual(route.embedded,{('0','0',1)})
         self.assertFalse(b.routing(['R1','R2'],True,False,{'0','1'}).segments)
-        recipe = self.recipe(b); recipe['replication']['count'] = 2; recipe['view']['tracks'] = False
+        recipe = self.recipe(b); recipe['replication'].update(count=2,tracks=False)
         out,groups = replicate(b,recipe)
         self.assertEqual(len(out.traces),len(b.traces)); self.assertEqual(len(out.replication_routing[1].vias),1)
         via = out.by_id[next(iter(out.replication_routing[1].vias))]
@@ -141,6 +141,66 @@ class LayoutTests(unittest.TestCase):
         out,groups = replicate(b,r)
         self.assertEqual([g['name'] for g in groups],['Source','Target'])
         self.assertEqual(out.parts['R3'].x,10); self.assertEqual(out.parts['R1'].x,6)
+
+    def test_rounded_pads_and_layer_membership(self):
+        b = fixture(); library = b.root.find('Library')
+        style = ET.SubElement(library,'PadStyle',Name='S',Type='Surface',Side='Top')
+        ET.SubElement(style,'MainStack',Shape='Rectangle',Width='2',Height='4',Corner='25')
+        b.parts['R1'].footprint.find('./Pads/Pad').set('Style','S')
+        b = Board(data=ET.tostring(b.root)); part = b.parts['R1']
+        points = b.pad_polygons(part)[0][1]
+        self.assertEqual(len(points),36)
+        self.assertAlmostEqual(points[0][0],-1); self.assertAlmostEqual(points[0][1],-1.5)
+        self.assertFalse(any(abs(x+1)<1e-8 and abs(y+2)<1e-8 for x,y in points))
+        self.assertEqual(b.pad_layers(part,'1'),{'0'})
+        part.side = 'Bottom'; self.assertEqual(b.pad_layers(part,'1'),{'1'})
+        b.pad_styles['S'].set('Type','Through'); self.assertEqual(b.pad_layers(part,'1'),{'0','1'})
+
+    def test_body_origin_is_local_and_leaves_pads_unchanged(self):
+        import math
+        b = fixture(); part = b.parts['R1']; part.angle = math.pi/2; part.flip = True
+        ET.SubElement(part.footprint,'Origin',X='.3',Y='.4')
+        before = b.pads(part)
+        data = {'sizes':[{'pattern':part.pattern,'width_mm':2,'height_mm':1,'rotation_deg':30,'origin_x_mm':.2,'origin_y_mm':-.1}]}
+        _,poly,_,_ = b.geometry(part,data)
+        self.assertAlmostEqual(sum(x for x,y in poly)/4,-.3)
+        self.assertAlmostEqual(sum(y for x,y in poly)/4,-.5)
+        self.assertEqual(b.pads(part),before)
+        del data['sizes'][0]['origin_x_mm']; del data['sizes'][0]['origin_y_mm']
+        _,poly,_,_ = b.geometry(part,data)
+        self.assertAlmostEqual(sum(x for x,y in poly)/4,-.4)
+        self.assertAlmostEqual(sum(y for x,y in poly)/4,-.3)
+
+    def test_legacy_orientation_migrates_without_changing_view(self):
+        for down in [False,True]:
+            for rotated in [False,True]:
+                view = {'y_down':down,'rotate_workspace':rotated}; migrate_view(view)
+                legacy = -1 if view.get('legacy_rotation_deg') == 180 else 1
+                actual = ((-1 if view['mirror'] else 1)*legacy,-legacy)
+                sign = -1 if rotated else 1
+                self.assertEqual(actual,(sign,sign*(1 if down else -1)))
+
+    def test_replication_selection_is_independent_of_view(self):
+        b = fixture(); recipe = self.recipe(b)
+        recipe['view'].update(tracks=False,vias=False)
+        out,groups = replicate(b,recipe)
+        self.assertEqual(len(out.traces),len(b.traces)+4)
+        recipe['replication'].update(tracks=False,vias=False)
+        recipe['view'].update(tracks=True,vias=True)
+        out,groups = replicate(b,recipe)
+        self.assertEqual(len(out.traces),len(b.traces))
+        self.assertEqual(len(out.parts),len(b.parts)+4)
+
+    def test_migration_preserves_old_copy_choices_once(self):
+        b = fixture(); recipe = self.recipe(b)
+        for key in ('tracks','vias','layers'): del recipe['replication'][key]
+        recipe['view'].update(tracks=False,vias=True,layers=['1'])
+        migrate_replication(recipe,b)
+        self.assertFalse(recipe['replication']['tracks']); self.assertTrue(recipe['replication']['vias'])
+        self.assertEqual(recipe['replication']['layers'],['1']); self.assertNotIn('layers',recipe['view'])
+        recipe['view'].update(tracks=True,vias=False)
+        migrate_replication(recipe,b)
+        self.assertFalse(recipe['replication']['tracks']); self.assertTrue(recipe['replication']['vias'])
 
 
 if __name__ == '__main__':

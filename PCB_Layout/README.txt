@@ -16,6 +16,11 @@ editor's sidecar automatically. Source paths are relative where possible.
 component_sizes.json is the central body database; settings.json is local
 window/recent-file state. No dependency on DSDUC scripts or the temp viewer.
 
+Copper is composited per layer before applying inactive-layer opacity.
+Body picking tests the transformed polygon directly. Body offsets in size
+entries are relative to Pattern/Origin, before component flip and rotation;
+pad and routing coordinates retain their original XML coordinate system.
+
 Body rectangles and polygon clearance are adapted from lister_viewer.py.
 Replication/topology handling is informed by the DSDUC PCB scripts, generalized
 to explicit groups, fresh identities and linear/grid/rotational transforms.

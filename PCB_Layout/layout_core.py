@@ -39,6 +39,9 @@ def load_sizes(path=SIZES_PATH):
                 raise ValueError(f'{key} must be a positive finite number.')
         if not math.isfinite(float(entry.get('rotation_deg', 0))):
             raise ValueError('rotation_deg must be finite.')
+        for key in ('origin_x_mm','origin_y_mm'):
+            if not math.isfinite(float(entry.get(key,0))):
+                raise ValueError(f'{key} must be finite.')
         if entry.get('pattern_match', 'exact') not in ('exact', 'contains'):
             raise ValueError('pattern_match must be exact or contains.')
     return data
@@ -62,6 +65,43 @@ def size_match(part, data):
 def rotate(x, y, angle):
     c, s = math.cos(angle), math.sin(angle)
     return x*c-y*s, x*s+y*c
+
+
+def rounded_rectangle(width, height, corner_percent):
+    radius = min(width,height)*max(0,min(.5,number(corner_percent)/100))
+    if radius == 0:
+        return [(-width/2,-height/2),(width/2,-height/2),(width/2,height/2),(-width/2,height/2)]
+    result = []
+    for x,y,start in [(-width/2+radius,-height/2+radius,math.pi),
+                      (width/2-radius,-height/2+radius,-math.pi/2),
+                      (width/2-radius,height/2-radius,0),
+                      (-width/2+radius,height/2-radius,math.pi/2)]:
+        result.extend((x+radius*math.cos(start+i*math.pi/16),y+radius*math.sin(start+i*math.pi/16)) for i in range(9))
+    return result
+
+
+def migrate_view(view):
+    """Preserve legacy view transforms; new recipes use normal XY + mirror."""
+    if 'mirror' not in view:
+        if 'y_down' in view or 'rotate_workspace' in view:
+            down,rotated = view.get('y_down',True),view.get('rotate_workspace',True)
+            view['mirror'] = bool(down)
+            if bool(down) != bool(rotated):
+                view['legacy_rotation_deg'] = 180
+        else:
+            view['mirror'] = False
+    view.pop('y_down',None); view.pop('rotate_workspace',None)
+
+
+def migrate_replication(recipe, board):
+    """Split old shared routing controls into independent replication settings."""
+    settings,view = recipe['replication'],recipe['view']
+    for key in ('tracks','vias'):
+        settings.setdefault(key,view.get(key,False))
+    if settings.get('layers') is None:
+        previous = view.get('layers')
+        settings['layers'] = list(board.layers if previous is None else previous)
+    view.pop('layers',None)
 
 
 def number(value):
@@ -190,7 +230,9 @@ class Board:
             self.parts[ref] = p; self.by_id[p.id] = p
         self.pad_styles = {p.get('Name'): p for p in self.root.iter('PadStyle')}
         self.via_sizes = {v.get('Id'): number(v.get('Size', 0))*self.factor for v in self.board.findall('./ViaStyles/ViaStyle')}
+        self.via_drills = {v.get('Id'): number(v.get('HoleSize', 0))*self.factor for v in self.board.findall('./ViaStyles/ViaStyle')}
         self.layers = {e.get('Id'): e.findtext('Name', 'Layer '+e.get('Id')) for e in self.board.findall('./CopperLayers/Lay')}
+        self.copper_layer_ids = list(self.layers)
         self.nets = {e.get('Id'): e for e in self.board.findall('./Nets/Net')}
         self.traces = {(n, t.get('Id')): t for n, net in self.nets.items() for t in net.findall('./Traces/Trace')}
         for t in self.traces.values():
@@ -203,6 +245,10 @@ class Board:
             x = -x
         x, y = rotate(x, y, part.angle)
         return part.x+x, part.y+y
+
+    def footprint_origin(self, part):
+        origin = part.footprint.find('Origin') if part.footprint is not None else None
+        return (number(origin.get('X',0))*self.factor,number(origin.get('Y',0))*self.factor) if origin is not None else (0,0)
 
     def pads(self, part):
         result = {}
@@ -226,7 +272,7 @@ class Board:
             x, y = number(e.get('X', 0))*self.factor, number(e.get('Y', 0))*self.factor
             angle = number(e.get('Angle', 0))
             ellipse = stack.get('Shape') == 'Ellipse'
-            points = [(width/2*math.cos(i*math.tau/32), height/2*math.sin(i*math.tau/32)) for i in range(32)] if ellipse else [(-width/2,-height/2),(width/2,-height/2),(width/2,height/2),(-width/2,height/2)]
+            points = [(width/2*math.cos(i*math.tau/32), height/2*math.sin(i*math.tau/32)) for i in range(32)] if ellipse else rounded_rectangle(width,height,stack.get('Corner',0))
             ox, oy = number(stack.get('XOff', 0))*self.factor, number(stack.get('YOff', 0))*self.factor
             poly = []
             for px, py in points:
@@ -235,14 +281,29 @@ class Board:
             result.append((e.get('Id'), poly))
         return result
 
+    def pad_layers(self, part, pad_id):
+        layers = self.copper_layer_ids or list(self.layers)
+        if not layers or part.footprint is None:
+            return set(layers)
+        pad = next((p for p in part.footprint.findall('./Pads/Pad') if p.get('Id') == pad_id),None)
+        style = self.pad_styles.get(pad.get('Style')) if pad is not None else None
+        if style is None or style.get('Type') != 'Surface':
+            return set(layers)
+        bottom = pad.get('Side',style.get('Side','Top')) == 'Bottom'
+        if part.side == 'Bottom':
+            bottom = not bottom
+        return {layers[-1] if bottom else layers[0]}
+
     def geometry(self, part, sizes, extra_rotation=0):
         index, entry = size_match(part, sizes)
         paths = []
         if entry:
             w, h = number(entry['width_mm']), number(entry['height_mm'])
-            angle = part.angle+math.radians(number(entry.get('rotation_deg', 0))+extra_rotation)
+            angle = math.radians(number(entry.get('rotation_deg', 0))+extra_rotation)
             poly = [rotate(x, y, angle) for x, y in [(-w/2,-h/2),(w/2,-h/2),(w/2,h/2),(-w/2,h/2)]]
-            poly = [(part.x+x, part.y+y) for x, y in poly]
+            ox,oy = self.footprint_origin(part)
+            ox += number(entry.get('origin_x_mm',0)); oy += number(entry.get('origin_y_mm',0))
+            poly = [self.local_to_board(part,(ox+x,oy+y)) for x,y in poly]
             return [(poly, True)], poly, 'Size database', index
         shapes = part.footprint.findall('./Shapes/Shape') if part.footprint is not None else []
         outlines = [s for s in shapes if 'outline' in s.get('Layer', '').casefold()]
@@ -402,8 +463,8 @@ def default_recipe(board):
     if defaults.get('schema_version') != 1 or not isinstance(defaults.get('recipe'),dict):
         raise ValueError('Project defaults require schema_version 1 and a recipe object.')
     recipe = deepcopy(defaults['recipe']); recipe.update(schema_version=1,pcb=str(board.path))
-    if recipe['view'].get('layers') is None:
-        recipe['view']['layers'] = list(board.layers)
+    migrate_view(recipe['view'])
+    migrate_replication(recipe,board)
     return recipe
 
 
@@ -614,7 +675,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
         total = int(settings['columns'])*int(settings['rows'])
     if not 2 <= total <= 1000:
         raise ValueError('Replication needs 2–1000 total instances, including the source.')
-    layers = set(recipe['view']['layers']); tracks = recipe['view']['tracks']; vias = recipe['view']['vias']
+    layers = set(settings['layers']); tracks = settings['tracks']; vias = settings['vias']
     routes = source.routing(source_refs,tracks,vias,layers)
     fragments = routing_fragments(source,routes) if tracks else []
     result = Board(data=ET.tostring(source.root,encoding='utf-8',xml_declaration=True))
@@ -669,7 +730,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
             if tracks:
                 protected = result.routing(source_refs,tracks,vias,layers)
                 if any(edges & protected.segments.get(key,set()) for key,edges in old_routes.segments.items()):
-                    raise ValueError('Source and destination groups share selected copper. Narrow the groups/layers, or arrange parts with Tracks off.')
+                    raise ValueError('Source and destination groups share selected copper. Narrow the groups/layers, or uncheck Tracks under What to replicate.')
                 remove_routing(result,old_routes)
             # Remove only unused private vias. Shared external vias stay in place.
             remaining_refs = {t.get('Object'+s) for n in result.nets.values() for t in n.findall('./Traces/Trace') for s in ('1','2') if t.get('Connected'+s) == 'Pad'}
