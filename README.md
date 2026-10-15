@@ -1,24 +1,14 @@
 # DipTrace Tools
 
-Three desktop tools for reusing DipTrace designs, preparing assembly orders and refining PCB placement. All use Python/PySide6, with launchers for Windows, macOS and Linux. Part_DB and JLCPCB_BOM share a configurable normalization language.
+Three desktop tools for reusing DipTrace designs, preparing assembly orders and refining PCB placement. All use Python/PySide6, with launchers for Windows, macOS and Linux. JLCPCB_BOM and Part_DB share a configurable normalization language.
 
 ## Why these tools exist
-
-**Part_DB** tracks historical use of parts, with optional storage locations. It helps you find parts used in the past, where they are stored, and which projects used them.
 
 **JLCPCB_BOM** helps create, maintain, verify and back-annotate JLCPCB BOMs. It connects schematic data, editable project JSON and JLCPCB workbooks, so changes can be carried between design and ordering stages instead of re-entered. Schematic fields can be brought into JSON, JLCPCB selections can be read back into it, and edited Name/Value fields can be back-annotated into DipTrace.
 
 **PCB_Layout** helps inspect placement feasibility using custom component body sizes and a configurable minimum placement gap. It also replicates complex patterns across a PCB: edit one group, then automatically generate or update the rest, including routing and vias.
 
-## Part_DB
-
-- **Turn design history into a reusable part library.** Find parts used in earlier designs and trace them to the exact projects, files and designators.
-- **Find the physical parts too.** Keep drawer numbers or other storage labels beside each part, independently of schematic refreshes.
-- **Search large archives quickly.** Normalize names, values and packages, search with wildcards, and reuse unchanged files instead of parsing the entire archive again.
-
-Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Select a base folder and filter fields under **Tools → Settings**, then refresh. **Help → How to use** opens the user guide.
-
-<img src="part_db_screen.png" alt="Part_DB" width="720">
+**Part_DB** tracks historical use of parts, with optional storage locations. It helps you find parts used in the past, where they are stored, and which projects used them.
 
 ## JLCPCB_BOM
 
@@ -44,19 +34,29 @@ Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a 
 
 The central [component_sizes.json](PCB_Layout/component_sizes.json) starts with 0402 (1.05 × 0.55 mm), SOT23 (3.05 × 1.4 mm, 90° correction), and 0805 (2.2 × 1.4 mm) body rectangles from the reference viewer. Right-click a part to define a pattern, name, or combined match. Priority is **pattern < name < pattern + name**. Bodies are centered on the footprint origin, with optional additional X/Y offsets. The initial body gap is 0.2 mm; dimensions and gap can be changed. These are body checks, excluding pads and leads. Outline/silkscreen fallback checks are estimates.
 
+## Part_DB
+
+- **Turn design history into a reusable part library.** Find parts used in earlier designs and trace them to the exact projects, files and designators.
+- **Find the physical parts too.** Keep drawer numbers or other storage labels beside each part, independently of schematic refreshes.
+- **Search large archives quickly.** Normalize names, values and packages, search with wildcards, and reuse unchanged files instead of parsing the entire archive again.
+
+Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Select a base folder and filter fields under **Tools → Settings**, then refresh. **Help → How to use** opens the user guide.
+
+<img src="part_db_screen.png" alt="Part_DB" width="720">
+
 ## Defaults you can change
 
 ### Normalization
 
 Each program has its own `normalization_rules.json`, opened through **Tools → Open normalization rules**. Both use the same engine and **Help → Normalization rule reference**. Rules support regex replacements, captures, conditions, fixed-text assignments, numeric formatting and assembly exclusion.
 
-| Default behavior | Part_DB | JLCPCB_BOM |
+| Default behavior | JLCPCB_BOM | Part_DB |
 | --- | --- | --- |
-| Generic names | Clears exact `RES`, `CAP`, `IND`, ignoring case | Keeps names |
-| Values | Formats R/C/L parts with Ω/F/H; preserves notes and unknown text | Preserves established R/C assembly formatting, including explicit resistance on other designators |
-| Examples | `4k7 → 4.7kΩ`; `2u2 → 2.2µF` or `2.2µH` | Electronic shorthand, unit suffixes and micro notation are normalized for assembly |
+| Generic names | Keeps names | Clears exact `RES`, `CAP`, `IND`, ignoring case |
+| Values | Preserves established R/C assembly formatting, including explicit resistance on other designators | Formats R/C/L parts with Ω/F/H; preserves notes and unknown text |
+| Examples | Electronic shorthand, unit suffixes and micro notation are normalized for assembly | `4k7 → 4.7kΩ`; `2u2 → 2.2µF` or `2.2µH` |
 | Footprints | Simplifies recognized package names to their four-digit size | Same simplification, configured in its own rules file |
-| DNP/DNM | Keeps parts searchable | Excludes case-insensitive DNP/DNM tokens in Name or Value; **removes them from both BOM and CPL** |
+| DNP/DNM | Excludes case-insensitive DNP/DNM tokens in Name or Value; **removes them from both BOM and CPL** | Keeps parts searchable |
 
 Explicit resistance links such as `L5 = 0R` retain resistance units. Case-sensitive SI prefixes remain distinct (`m` versus `M`). Numeric formatting does not rescale equivalent spellings such as `100nF` and `0.1µF`. JLCPCB_BOM's defaults preserve its previous assembly behavior; adding custom rules can change it.
 
@@ -84,12 +84,12 @@ The global [AI check settings](JLCPCB_BOM/ai_check_settings.json) control the in
 
 ## Installation and repository contents
 
-Keep `Part_DB`, `JLCPCB_BOM`, `PCB_Layout` and `Shared` as sibling folders in a writable location. Install Python 3.10 or newer, then the relevant dependencies (use `python3` on macOS/Linux):
+Keep `JLCPCB_BOM`, `PCB_Layout`, `Part_DB` and `Shared` as sibling folders in a writable location. Install Python 3.10 or newer, then the relevant dependencies (use `python3` on macOS/Linux):
 
 ```powershell
-python -m pip install -r Part_DB/requirements.txt
 python -m pip install -r JLCPCB_BOM/requirements-editor.txt
 python -m pip install -r PCB_Layout/requirements.txt
+python -m pip install -r Part_DB/requirements.txt
 ```
 
 | Platform | Launcher in each program folder |
@@ -98,7 +98,7 @@ python -m pip install -r PCB_Layout/requirements.txt
 | macOS | Double-click `Launch ….command` |
 | Linux | Run the program's `.sh` launcher, e.g. `sh "PCB_Layout/Launch PCB Layout.sh"`, from the repository root |
 
-For downloaded copies on macOS, first run `chmod +x Part_DB/*.command JLCPCB_BOM/*.command PCB_Layout/*.command`. A virtual environment can be used on any platform; activate it before running a launcher from a terminal. On Linux, install your distribution's Qt desktop dependencies if Qt reports a missing platform plugin. A graphical desktop session is required.
+For downloaded copies on macOS, first run `chmod +x JLCPCB_BOM/*.command PCB_Layout/*.command Part_DB/*.command`. A virtual environment can be used on any platform; activate it before running a launcher from a terminal. On Linux, install your distribution's Qt desktop dependencies if Qt reports a missing platform plugin. A graphical desktop session is required.
 
 Files open with the system's default application. Install or associate a suitable application for each file type; opening a schematic requires a handler for DipTrace files. Scanning, searching and generating outputs do not require DipTrace to be running. The macOS/Linux paths and launchers have automated dispatch checks, but have not been tested on native desktops yet.
 
