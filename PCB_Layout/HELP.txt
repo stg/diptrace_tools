@@ -17,13 +17,13 @@ inspect it. Labels, Pads, Tracks and Vias can be shown independently; copper
 is off by default. Source and All show current PCB routing for the source
 or all groups. Preview shows the proposed placement and routing together.
 
-The top Layer selector emphasizes one copper layer. Other layers are drawn
+The top inspect layer selector emphasizes one copper layer. Other layers are drawn
 as complete layers at one-third opacity. Keys 1–9 select available layers;
 Page Up/Down move between them without wrapping. These shortcuts leave text
 entry alone. This selector affects rendering only, not what is copied.
 
 Red means a same-side body gap is below the configured minimum (initially
-0.2 mm). Minimum gap and Mirror view are on the main toolbar. Normal XY
+0.2 mm). Minimum error gap and Mirror view are on the main toolbar. Normal XY
 orientation is the default; Mirror view flips it horizontally. Pads and
 leads are excluded from body clearance. This checks the selected placement,
 not all manufacturing or electrical constraints of the board.
