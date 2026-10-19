@@ -9,6 +9,10 @@ import hashlib
 import math
 from pathlib import Path
 import re
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from Shared.references import split_reference
 
 from lxml import etree as ET
 
@@ -754,8 +758,10 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
                 continue
             copied = deepcopy(part.element)
             cid = str(next_component); next_component += 1; cmap[part.id] = cid
-            prefix = re.match(r'[A-Za-z]+',part.ref)
-            prefix = prefix.group() if prefix else 'U'
+            try:
+                prefix, _ = split_reference(part.ref)
+            except ValueError:
+                prefix = part.ref or 'U'
             index = prefix_numbers[prefix]
             while prefix+str(index) in occupied_refs:
                 index += 1

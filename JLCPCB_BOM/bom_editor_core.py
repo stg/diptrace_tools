@@ -22,7 +22,7 @@ from bom_values import SI_PREFIX_EXPONENTS, engineering_magnitude, natural_sort_
 
 FIELDS = ("Name", "Value", "Pattern", "LCSC Part #")
 ALTERNATE_FIELDS = FIELDS + ("Notes",)
-REFS = re.compile(r"[A-Za-z]+\d+")
+REFS = conversion.REFERENCE_RE
 PART = re.compile(r"C\d+", re.I)
 
 
@@ -54,8 +54,7 @@ def pattern_difference_is_warning(input_pattern, json_pattern):
 
 
 def ref_key(ref):
-    match = re.fullmatch(r"([A-Za-z]+)(\d+)(.*)", ref)
-    return (match[1].upper(), int(match[2]), match[3]) if match else (ref, 0, "")
+    return conversion.natural_reference_key(ref)
 
 
 def fingerprint(path):

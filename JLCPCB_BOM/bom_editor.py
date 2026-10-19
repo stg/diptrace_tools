@@ -88,14 +88,13 @@ class Editor(QMainWindow):
         self.filter.setToolTip("All words must match. Wildcards: * = any text, # = digits, ? = one character.")
         self.filter.textChanged.connect(self.apply_filter)
         row.addWidget(self.filter)
-        row.addWidget(QLabel("Input: red = mismatch; yellow = extra details or unrecognized pattern   •   Output: red = refresh needed"))
         layout.addLayout(row)
         splitter = QSplitter(Qt.Vertical)
         self.splitter = splitter
         layout.addWidget(splitter, 1)
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
-        for column in range(len(HEADERS)):
+        for column in range(len(HEADERS) - 1):
             color = "#e8eef8" if column < 4 else "#fff2cc" if column < 8 else "#e7f1e6"
             self.table.horizontalHeaderItem(column).setBackground(QColor(color))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -688,15 +687,19 @@ class Editor(QMainWindow):
                 self.table.setCellWidget(index, column, combo)
         if any(ref not in project.source for ref in refs):
             status.append("Missing from schematic")
-        if source_mismatch:
-            status.append("Input differs" if source_critical_mismatch else " / ".join(f"{field} differs" for field in source_warnings))
-        if output_mismatch:
-            status.append("Generate needed")
-        if using_alternate:
-            status.append("Alternate selected")
         if all(value is None for value in expected.values()):
             status.append("Excluded")
-        item(11, "; ".join(status) or "In sync", source_mismatch or output_mismatch or using_alternate,
+        if output_mismatch:
+            status.append("Generate needed")
+        if source_critical_mismatch:
+            status.append("Input differs")
+        if not status:
+            status.append("In sync")
+        if source_mismatch and not source_critical_mismatch:
+            status.extend(f"{field} differs" for field in source_warnings)
+        if using_alternate:
+            status.append("Alternate selected")
+        item(11, ", ".join(status), source_mismatch or output_mismatch or using_alternate,
              warning=not source_critical_mismatch and (not output_mismatch or using_alternate))
 
     def edited(self, cell):

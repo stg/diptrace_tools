@@ -85,6 +85,20 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(len(repeated.parts),len(copied.parts)); self.assertEqual(len(repeated.traces),len(copied.traces))
         self.assertEqual([p.x for p in repeated.parts.values() if not p.via],[p.x for p in copied.parts.values() if not p.via])
 
+    def test_copies_preserve_the_prefix_before_the_final_counter(self):
+        b = fixture()
+        for old, new in [('R1', 'J6-1'), ('R2', 'J6-2'), ('R3', 'J6-10')]:
+            b.parts[old].element.find('RefDes').text = new
+        b = Board(data=ET.tostring(b.root))
+        recipe = default_recipe(b)
+        recipe['groups'] = [{'name': 'Source', 'refs': ['J6-1', 'J6-2']}]
+        recipe['replication'].update(mode='Create copies', count=2, tracks=False, vias=False)
+        original = ET.tostring(b.root)
+        copied, groups = replicate(b, recipe)
+        self.assertEqual(groups[1]['refs'], ['J6-3', 'J6-4'])
+        self.assertIn('J6-10', copied.parts)
+        self.assertEqual(ET.tostring(b.root), original)
+
     def test_existing_preserves_net_ids_and_external_copper(self):
         b = fixture(); recipe = self.recipe(b); recipe['replication'].update(mode='Arrange existing groups',dx=4)
         original_external = ET.tostring(b.traces['0','2'])

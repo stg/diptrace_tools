@@ -15,6 +15,7 @@ if str(COMPANION_ROOT) not in sys.path:
     sys.path.insert(0, str(COMPANION_ROOT))
 from Shared.normalization import load_rules, normalize_record
 from Shared.value_normalization import format_quantity
+from Shared.references import REFERENCE_RE, reference_sort_key
 
 
 
@@ -26,9 +27,6 @@ TARGET_COLUMNS = (
 )
 CPL_ADJUSTMENTS_PATH = Path(__file__).with_name("cpl_adjustments.json")
 
-# Handles normal comma-separated references and the observed "R208. R8"
-# separator typo in the current BOM.
-REFERENCE_RE = re.compile(r"[A-Za-z]+\d+")
 NORMALIZATION_RULES_PATH = Path(__file__).with_name("normalization_rules.json")
 _rule_cache = None
 
@@ -85,10 +83,8 @@ def explode_references(rows: list[dict[str, str]], path: Path) -> dict[str, dict
     return by_reference
 
 
-def natural_reference_key(reference: str) -> tuple[str, int, str]:
-    match = re.fullmatch(r"([A-Z]+)(\d+)(.*)", reference)
-    assert match
-    return match.group(1), int(match.group(2)), match.group(3)
+def natural_reference_key(reference: str):
+    return reference_sort_key(reference)
 
 
 def write_changes(original_path: Path, current_path: Path, output_path: Path) -> int:
