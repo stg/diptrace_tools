@@ -2,6 +2,22 @@
   "schema_version": 1,
   "rules": [
     {
+      "description": "Notes containing a question mark need review.",
+      "operation": "highlight",
+      "field": "notes",
+      "when": {"notes": "\\?"},
+      "color": "yellow",
+      "status": "Note needs review"
+    },
+    {
+      "description": "Notes containing an exclamation mark require attention; takes priority over review.",
+      "operation": "highlight",
+      "field": "notes",
+      "when": {"notes": "!"},
+      "color": "red",
+      "status": "Note requires attention"
+    },
+    {
       "description": "Exclude DNP/DNM markers in component names from assembly output.",
       "operation": "exclude",
       "when": {"name": "(?:^|[ \\t/])(?:DNP|DNM)(?:$|[ \\t/])"},

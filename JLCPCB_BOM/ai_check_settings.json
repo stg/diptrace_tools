@@ -2,6 +2,7 @@
   "schema_version": 1,
   "instruction_lines": [
     "INSTRUCTION: For each line, compare the original BOM description to the scraped LCSC product. Confirm they match; if not, flag it. OUTPUT: Only the flagged items (or no flagged items confirmation) and reason.",
-    "DO NOT FLAG: Higher capacitor voltage than specified is OK. Higher wattage than specified is OK."
+    "DO NOT FLAG: Higher capacitor voltage than specified is OK. Higher wattage than specified is OK.",
+    "CONTEXT: A line may end with // followed by project notes. Notes may override problems: do not flag a difference explicitly accepted by the notes. Lines without notes omit // entirely."
   ]
 }

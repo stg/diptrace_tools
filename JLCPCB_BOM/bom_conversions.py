@@ -276,9 +276,13 @@ def cpl_coordinate_column(headers, axis):
     return cpl_coordinate_spec(headers, axis)[0]
 
 
+class MissingCPLFile(ValueError):
+    """The expected placement export has not been supplied yet."""
+
+
 def validate_cpl_input(csv_path: Path):
     if not csv_path.is_file():
-        raise ValueError(f"Expected CPL input file is missing: {csv_path}.\nSet cpl_file in the project JSON to override the filename.")
+        raise MissingCPLFile(f"Expected CPL input file is missing: {csv_path}.\nSet cpl_file in the project JSON to override the filename.")
     rows = read_csv_grid(csv_path)
     if not rows:
         raise ValueError(f"Expected CPL input file is empty: {csv_path}")

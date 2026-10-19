@@ -30,6 +30,9 @@ named after the schematic: Board.dchxml expects Board_CPL.csv.
 The left columns show the schematic; the middle columns are your editable
 JSON data; the right columns show assembly output. Red highlights differences;
 yellow highlights details that need review. Save JSON keeps your edits.
+The editable Note column stores your own notes in JSON. Notes are searchable
+and are not included in assembly output or schematic back-annotation. The AI
+check includes them after // on the relevant lines; lines without notes omit it.
 Edit -> Focus filter (Ctrl+F) selects the filter text. Copy selected rows
 (Ctrl+C) copies the displayed columns. File -> Reload (Ctrl+R) rereads the
 schematic and JSON; it asks before discarding unsaved edits.
@@ -55,15 +58,22 @@ Numbers are matched by designator. When an incoming number conflicts with
 your saved primary number, choose whether to replace it, add an alternative,
 or skip it.
 
-Tools -> Check JLCPCB BOM from XLS(X) prepares a text file for an AI checking pass.
-It collects supplier product details and combines them with the descriptions in
-your selected workbook and ready-to-use instructions for finding mismatches.
-The text file is saved beside the workbook and opened for you.
+Tools -> Check with AI prepares a text file directly from the current project,
+including unsaved edits, selected alternatives and notes. No workbook or placement
+CSV is needed. It compares the parts you would generate: normalization and exclusion
+rules apply. Parts without an assigned JLCPCB number are marked for review.
+The tool collects supplier product details and combines them with your part
+descriptions, footprints and ready-to-use instructions for finding mismatches.
+The report opens automatically, normally at order/Board_AI_Check.txt.
 
 Copy or attach that text to an AI assistant to run the comparison and report
 mismatched parts. RoHS status is checked separately by the tool. Review the
 findings, edit your parts or alternatives as needed, choose the final output
 selection, then generate again to produce your final assembly files.
+The log uses red for errors and confirmed non-RoHS parts. Green RoHS means every
+checked part has confirmed compliant data. A separate dark-yellow line lists
+parts with missing or unknown RoHS data; it is omitted when none are missing.
+Missing placement/CPL data is also shown in dark yellow.
 
 Tools -> Open AI check settings lets you customize the AI instructions and
 accepted substitutions in a JSON file. Save it before the next check; the
@@ -88,9 +98,11 @@ For a schematic called Board:
   Board_CPL.csv          Placement export, beside the schematic
   order/Board_BOM.xls    Generated assembly BOM
   order/Board_CPL.xls    Generated assembly placement workbook
+  order/Board_AI_Check.txt   AI instructions and part comparison data
+  order/Board_AI_Check.rohs.txt   Separate RoHS report
 
 These are the defaults. Tools -> Open project settings JSON lets you change
-the output folder, source CPL filename and generated BOM/CPL filenames for
+the output folder, source CPL filename, generated BOM/CPL filenames and AI report filename for
 this project. The source CPL must stay beside the schematic.
 Tools -> Open new-project defaults edits the templates copied into newly
 created projects; changing those defaults does not alter existing projects.
@@ -114,6 +126,10 @@ CSV is never rewritten.
 
 Custom normalization
 --------------------
+Adjacent rows belonging to one generated BOM line share cells across the
+three Output columns. Sorting and filtering update this display; JSON fields
+and notes remain separate. Nonadjacent rows repeat their output information.
+
 Tools -> Open normalization rules opens the rules used to format output
 names, values and footprints and exclude unwanted parts. Excluded parts are
 removed from both BOM and CPL. You can change the expressions or add custom

@@ -5,6 +5,7 @@
     "cpl_file": "{stem}_CPL.csv",
     "bom_file": "{stem}_BOM.xls",
     "cpl_output_file": "{stem}_CPL.xls",
+    "ai_check_file": "{stem}_AI_Check.txt",
     "cpl_decimals": 3
   }
 }

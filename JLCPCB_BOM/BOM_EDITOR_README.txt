@@ -243,7 +243,7 @@ The generation log lists designators whose placements were corrected.
 
 LCSC workbooks
 --------------
-Both LCSC buttons open a picker for .xls/.xlsx. Workbook content is detected, so
+The JLCPCB-number import opens a picker for .xls/.xlsx. Workbook content is detected, so
 JLC OOXML workbooks with an .xls suffix also work.
 
 JLCPCB part numbers from XLS(X): accepts the simple JLC BOM table and the BOM Matching /
@@ -257,23 +257,19 @@ keeps the current output selection and copies primary component fields with a
 review note; edit those fields if the substitute differs. Blank workbook numbers do
 not clear existing JSON assignments. Import edits are saved with Save JSON.
 
-Check JLCPCB BOM from XLS(X): runs the EXISTING jlcpcb_bom_checker.py on the selected
-workbook, without modifying the checker or substituting JSON descriptions. The
-checker determines descriptions and part numbers from that workbook in its
-existing supported formats. Live download/scrape messages and progress appear in
-the log; cached pages/JSON are reused according to the checker. Stop check cancels
-the process. Success opens the resulting .txt in the default system text editor.
-If the check identifies non-RoHS parts, a warning lists their designators. RoHS
-status is read with the existing checker's own function, using its product cache.
-The checker writes its usual .txt and .rohs.txt reports beside the selected
-workbook. Downloaded HTML and scraped JSON use a single shared lcsc folder beside
-jlcpcb_bom_checker.py in the tool location, reused across all projects by both
-CLI and UI. Existing shared entries are retained. When checking an older project,
-missing entries are copied from the workbook's local lcsc folder; the local files
-are preserved. RoHS warnings read this same shared cache.
-This prepares the comparison report; it does not automatically certify
-electrical equivalence of every part.
-
-The checker is found beside the tool's bom_editor_core.py, so moving the complete
-tool folder does not require project changes. To use another
-installation, add "checker_script": "D:/path/jlcpcb_bom_checker.py" to the JSON.
+Check with AI uses a temporary snapshot of the current project, including unsaved
+edits, chosen alternatives and notes. It needs no workbook or placement CSV and
+does not save or back-annotate the project. Parts are selected, grouped, normalized
+and excluded exactly as for Generate; descriptions include footprints and designators.
+Unassigned parts are marked for review. Notes are attached after // only when present.
+The bundled jlcpcb_bom_checker.py runs in a background process. Preparation stages
+use an animated progress bar, followed by download/scrape progress. Stop check cancels.
+Success opens the AI instruction/report text in the default system text editor;
+the user supplies it to an AI assistant to perform the comparison.
+Reports use the project's output folder and ai_check_file (default {stem}_AI_Check.txt),
+with a companion .rohs.txt report. Non-RoHS warnings list exact designators.
+Product HTML and JSON are cached in the bundled tool's lcsc folder across projects;
+missing legacy cache files are copied from the project's lcsc folder without removing
+or replacing existing files. The desktop command always uses the bundled checker;
+legacy checker_script settings have no effect. The standalone checker retains its
+legacy workbook/CSV CLI input for compatibility, outside the desktop workflow.

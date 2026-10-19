@@ -27,6 +27,17 @@ established output behavior. Part_Part_DB applies rules to individual symbol rec
 
 Operations
 ----------
+highlight
+  JLCPCB_BOM display rule: field must be notes; color is red or yellow.
+  when may match notes as well as name, value, pattern and refdes.
+  status is optional text appended to the Status column. The note and Status
+  receive the rule's color; existing red errors retain priority over yellow.
+  The last matching enabled highlight rule wins. This does not alter saved
+  data, assembly output or Part_DB's extraction cache.
+
+  {"operation": "highlight", "field": "notes", "when": {"notes": "!"},
+   "color": "red", "status": "Note requires attention"}
+
 exclude
   Marks a matching component for omission from JLCPCB_BOM's BOM and CPL output.
   Typically has when conditions, e.g. {"value": "(?:^|[ \\t/])DNP(?:$|[ \\t/])"}.

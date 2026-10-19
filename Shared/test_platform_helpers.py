@@ -1,12 +1,24 @@
 import sys
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from Shared.platform_helpers import open_file, show_startup_error
+from Shared.platform_helpers import open_file, show_startup_error, configure_app_icon
 
 
 class DesktopIntegrationTests(unittest.TestCase):
+    def test_all_apps_have_portable_nonempty_icons(self):
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+        with patch('Shared.platform_helpers.sys.platform', 'linux'):
+            for tool in ('jlcpcb_bom', 'pcb_layout', 'part_db'):
+                configure_app_icon(app, tool)
+                self.assertFalse(app.windowIcon().isNull())
+                self.assertFalse(app.windowIcon().pixmap(32, 32).isNull())
+                self.assertEqual(app.desktopFileName(), 'diptrace-tools-' + tool.replace('_', '-'))
+
     def test_windows_keeps_startfile(self):
         with patch('Shared.platform_helpers.sys.platform', 'win32'), patch('Shared.platform_helpers.os.startfile', create=True) as start:
             open_file('folder/file.dch')

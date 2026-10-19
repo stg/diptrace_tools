@@ -11,9 +11,10 @@ def project_defaults(stem, path=None):
     if not isinstance(config, dict) or config.get("schema_version") != 1 or not isinstance(config.get("project"), dict):
         raise ValueError("Project defaults must have schema_version 1 and a project object.")
     values = deepcopy(config["project"])
+    values.setdefault("ai_check_file", "{stem}_AI_Check.txt")
     if {"rows", "source", "schema_version"}.intersection(values):
         raise ValueError("Project defaults cannot override rows, source or schema_version.")
-    for field in ("output_folder", "cpl_file", "bom_file", "cpl_output_file"):
+    for field in ("output_folder", "cpl_file", "bom_file", "cpl_output_file", "ai_check_file"):
         if not isinstance(values.get(field), str) or not values[field].strip():
             raise ValueError(f"Project defaults {field} must be a nonempty string.")
         try:
@@ -21,7 +22,9 @@ def project_defaults(stem, path=None):
         except (KeyError, ValueError, IndexError) as error:
             raise ValueError(f"Invalid {field} template; use {{stem}} for the schematic name.") from error
         if field != "output_folder":
-            validate_filename(values[field], field, xls=field != "cpl_file")
+            validate_filename(values[field], field, xls=field in {"bom_file", "cpl_output_file"})
+            if field == "ai_check_file" and Path(values[field]).suffix.lower() != ".txt":
+                raise ValueError("ai_check_file must end in .txt.")
     if values["bom_file"].casefold() == values["cpl_output_file"].casefold():
         raise ValueError("BOM and CPL output filenames must differ.")
     if type(values.get("cpl_decimals", 3)) is not int or not 0 <= values.get("cpl_decimals", 3) <= 9:

@@ -12,7 +12,7 @@ def load_rules(path):
     for rule in config["rules"]:
         if not isinstance(rule, dict) or rule.get("operation") not in {
                 "regex_replace", "set", "format_quantity", "exclude", "clear_names",
-                "normalize_discrete_values", "clear_name_when_pattern_starts_with_name"}:
+                "normalize_discrete_values", "clear_name_when_pattern_starts_with_name", "highlight"}:
             raise ValueError("Unknown normalization-rule operation.")
         for flag in ("enabled", "case_sensitive", "require_token_boundary", "explicit_resistance", "ignore_case", "recognized_only", "match_first_letter"):
             if flag in rule and type(rule[flag]) is not bool:
@@ -28,6 +28,11 @@ def load_rules(path):
                     or unit not in {"Ω", "F", "H"} for prefix, unit in units.items()):
                 raise ValueError("designator_units must map uppercase designator prefixes to Ω, F or H.")
         operation = rule["operation"]
+        if operation == "highlight":
+            if rule.get("field") != "notes" or rule.get("color") not in {"red", "yellow"}:
+                raise ValueError("highlight requires field notes and color red or yellow.")
+            if not isinstance(rule.get("status", ""), str):
+                raise ValueError("highlight status must be a string.")
         if operation in {"regex_replace", "set", "format_quantity"}:
             if rule.get("field") not in {"name", "value", "pattern"}:
                 raise ValueError(f"{operation} field must be name, value or pattern.")
@@ -41,12 +46,13 @@ def load_rules(path):
             if operation == "format_quantity" and rule.get("unit") not in {"Ω", "F", "H"}:
                 raise ValueError("format_quantity unit must be Ω, F or H.")
         conditions = rule.get("when", {})
-        if not isinstance(conditions, dict) or any(field not in {"name", "value", "pattern", "refdes"}
+        allowed_fields = {"name", "value", "pattern", "refdes"} | ({"notes"} if operation == "highlight" else set())
+        if not isinstance(conditions, dict) or any(field not in allowed_fields
                 or not isinstance(pattern, str) for field, pattern in conditions.items()):
-            raise ValueError("when must map name, value, pattern and/or refdes to regex strings.")
+            raise ValueError("when must map supported fields to regex strings (notes is available for highlight).")
     # Human-readable descriptions do not affect extraction or invalidate the cache.
     signature = [{key: value for key, value in rule.items() if key != "description"}
-                 for rule in config["rules"]]
+                 for rule in config["rules"] if rule["operation"] != "highlight"]
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     for index, rule in enumerate(config["rules"], 1):
         flags = re.IGNORECASE if rule.get("ignore_case", False) else 0
@@ -65,7 +71,7 @@ def normalize_name(name, pattern, rules):
     for rule in rules:
         if not name or not rule.get("enabled", True):
             continue
-        if rule["operation"] == "normalize_discrete_values":
+        if rule["operation"] in {"normalize_discrete_values", "highlight"}:
             continue
         sensitive = rule.get("case_sensitive", True)
         compare = (lambda s: s) if sensitive else (lambda s: s.casefold())
@@ -87,7 +93,7 @@ def normalize_name(name, pattern, rules):
 def normalize_record(name, value, pattern, refdes, rules):
     fields = {"name": name, "value": value, "pattern": pattern, "refdes": refdes, "excluded": False}
     for rule in rules:
-        if not rule.get("enabled", True):
+        if not rule.get("enabled", True) or rule["operation"] == "highlight":
             continue
         if not all(regex.search(fields[field]) for field, regex in rule.get("_when", [])):
             continue
@@ -107,6 +113,17 @@ def normalize_record(name, value, pattern, refdes, rules):
         else:
             fields["name"] = normalize_name(fields["name"], fields["pattern"], [rule])
     return fields
+
+
+def note_highlight(notes, rules, *, name="", value="", pattern="", refdes=""):
+    """Return the last matching display rule without changing component data."""
+    fields = {"notes": notes, "name": name, "value": value, "pattern": pattern, "refdes": refdes}
+    result = None
+    for rule in rules:
+        if rule["operation"] == "highlight" and rule.get("enabled", True) and all(
+                regex.search(fields[field]) for field, regex in rule.get("_when", [])):
+            result = {"color": rule["color"], "status": rule.get("status", "")}
+    return result
 
 
 def normalize_component(name, value, pattern, refdes, rules):

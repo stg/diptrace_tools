@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from Shared.normalization import load_rules, normalize_component, normalize_record
+from Shared.normalization import load_rules, normalize_component, normalize_record, note_highlight
 
 
 class RuleLanguageTests(unittest.TestCase):
@@ -36,6 +36,26 @@ class RuleLanguageTests(unittest.TestCase):
         _, first = self.load([rule])
         _, second = self.load([{**rule, "description": "new wording"}])
         self.assertEqual(first, second)
+
+    def test_note_highlights_are_ordered_conditional_and_display_only(self):
+        plain, fingerprint = self.load([])
+        rules, styled_fingerprint = self.load([
+            {"operation": "highlight", "field": "notes", "when": {"notes": "\\?"},
+             "color": "yellow", "status": "Review"},
+            {"operation": "highlight", "field": "notes", "when": {"notes": "!"},
+             "color": "red", "status": "Action"},
+            {"operation": "highlight", "field": "notes", "when": {"notes": "!"},
+             "color": "yellow", "enabled": False},
+        ])
+        self.assertEqual(note_highlight('Check?', rules), {'color': 'yellow', 'status': 'Review'})
+        self.assertEqual(note_highlight('Check?!', rules), {'color': 'red', 'status': 'Action'})
+        self.assertIsNone(note_highlight('Accepted', rules))
+        self.assertEqual(normalize_record('RES', '10k', '0603', 'R1', rules),
+                         normalize_record('RES', '10k', '0603', 'R1', plain))
+        self.assertEqual(fingerprint, styled_fingerprint)
+        for change in ({'field': 'value'}, {'color': 'blue'}, {'status': 1}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.load([{'operation': 'highlight', 'field': 'notes', 'color': 'red', **change}])
 
     def test_exclusion_remains_set_after_later_rewrites(self):
         rules, _ = self.load([

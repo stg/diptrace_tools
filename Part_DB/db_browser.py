@@ -22,7 +22,7 @@ from db_core import (
     grouped_results, search_results,
 )
 
-from Shared.platform_helpers import open_file
+from Shared.platform_helpers import open_file, configure_app_icon
 
 DEFAULT_SETTINGS = {
     "schema_version": 1,
@@ -649,6 +649,7 @@ class Browser(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    configure_app_icon(app, "part_db")
     app.setStyle("Fusion")
     if sys.platform == "win32":
         app.setFont(QFont("Segoe UI", 9))

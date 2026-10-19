@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 32 32">
+  <title>DipTrace Tools - PCB Layout</title>
+  <rect x="1" y="1" width="30" height="30" rx="6" fill="#142b3c"/>
+  <g fill="#bda7f5">
+    <rect x="6" y="6" width="8" height="8" rx="1"/>
+    <rect x="18" y="6" width="8" height="8" rx="1"/>
+    <rect x="6" y="18" width="8" height="8" rx="1"/>
+    <rect x="18" y="18" width="8" height="8" rx="1"/>
+  </g>
+</svg>

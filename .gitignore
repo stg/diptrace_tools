@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *.error.log
 *.json.tmp
+*_AI_Check.txt
+*.rohs.txt
 # Keep design files, exports and project data local. Only shipped JSON config is tracked.
 *.dch
 *.dchxml

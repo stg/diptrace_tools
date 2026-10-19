@@ -77,7 +77,7 @@ def _read_csv_parts(path):
     return parts
 
 
-def _read_csv_rows(path):
+def _read_csv_rows(path, with_designators=False):
     rows_out = []
     with open(path, newline="", encoding="utf-8") as f:
         sample = f.read(4096)
@@ -90,12 +90,15 @@ def _read_csv_rows(path):
         rows = list(reader)
     if not rows:
         return rows_out
+    ref_column = next((i for i, header in enumerate(rows[0])
+                       if header.strip().casefold() in {"designator", "designators", "refdes"}), None)
     for row in rows[1:]:
         if not row:
             continue
         desc = row[0] if len(row) > 0 else ""
         part = row[-1] if len(row) > 0 else ""
-        rows_out.append((desc, part))
+        refs = row[ref_column] if ref_column is not None and ref_column < len(row) else ""
+        rows_out.append((desc, part, refs) if with_designators else (desc, part))
     return rows_out
 
 
@@ -103,7 +106,7 @@ def _read_excel_parts(path):
     return [part for _description, part in _read_excel_rows(path)]
 
 
-def _read_excel_rows(path):
+def _read_excel_rows(path, with_designators=False):
     try:
         import pandas as pd
     except Exception as exc:
@@ -166,18 +169,22 @@ def _read_excel_rows(path):
 
     if matching_header:
         header_row, description_column, part_column = matching_header
+        ref_column = [cell_text(value).casefold() for value in grid[header_row]].index("designator")
         rows_out = []
         for row in grid[header_row + 1 :]:
             desc = cell_text(row[description_column]) if description_column < len(row) else ""
             part = cell_text(row[part_column]) if part_column < len(row) else ""
             if desc or part:
-                rows_out.append((desc, part))
+                refs = cell_text(row[ref_column]) if ref_column < len(row) else ""
+                rows_out.append((desc, part, refs) if with_designators else (desc, part))
         return rows_out
 
     # Original tool format: first row is headers; descriptions are in the first
     # column and LCSC C-part numbers are in the final column.
     if not grid:
         return []
+    ref_column = next((i for i, header in enumerate(grid[0])
+                       if cell_text(header).casefold() in {"designator", "designators", "refdes"}), None)
     rows_out = []
     for row in grid[1:]:
         if not row:
@@ -185,8 +192,57 @@ def _read_excel_rows(path):
         desc = cell_text(row[0]) if len(row) > 0 else ""
         part = cell_text(row[-1]) if row else ""
         if desc or part:
-            rows_out.append((desc, part))
+            refs = cell_text(row[ref_column]) if ref_column is not None and ref_column < len(row) else ""
+            rows_out.append((desc, part, refs) if with_designators else (desc, part))
     return rows_out
+
+
+def load_check_notes(path):
+    """Read saved project rows, or the editor's temporary in-memory snapshot."""
+    from bom_editor_core import expand_rows
+    document = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    return expand_rows(document["rows"])
+
+
+def project_check_rows(records):
+    """Use the same selected parts, grouping and normalization as Generate."""
+    from bom_editor_core import FIELDS, grouped_rows, selected_component
+    from bom_conversions import assembly_bom_rows, TARGET_COLUMNS
+    selected = {ref: {field: selected_component(record)[field] for field in FIELDS}
+                for ref, record in records.items()}
+    rows = []
+    for row in assembly_bom_rows(grouped_rows(selected)):
+        description = f"{row['Designator']}: {row['Comment']}"
+        if row["Footprint"]:
+            description += f" [footprint: {row['Footprint']}]"
+        rows.append((description, row[TARGET_COLUMNS[3]], row["Designator"]))
+    return rows
+
+
+def notes_for_row(records, designators, part):
+    from bom_editor_core import REFS, selected_component
+    refs = REFS.findall(str(designators).upper())
+    if refs:
+        candidates = [(ref, records.get(ref, {})) for ref in refs]
+    else:
+        # Legacy workbooks may lack designators. Keep per-part labels in that case.
+        candidates = [(ref, row) for ref, row in records.items()
+                      if selected_component(row).get("LCSC Part #", "").upper() == part.upper()]
+    notes = []
+    for ref, row in candidates:
+        texts = [row.get("Notes", "")]
+        if row.get("Output selection", 0):
+            texts.append(selected_component(row).get("Notes", ""))
+        texts = list(dict.fromkeys(" ".join(text.split()) for text in texts if text.strip()))
+        notes.append((ref, "; ".join(texts)))
+    if notes and refs and len({note for _, note in notes}) == 1:
+        return notes[0][1]
+    return "; ".join(f"{ref}: {note}" for ref, note in notes if note)
+
+
+def verification_line(description, model, name, notes=""):
+    line = f"{description}\t{model}: {name}"
+    return line + (f" // {notes}" if notes else "") + "\n"
 
 
 def _normalize_parts(values):
@@ -372,8 +428,11 @@ def _extract_rohs_from_json(json_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download LCSC product pages for C-part numbers in a BOM file.")
-    parser.add_argument("input", help="Path to .xls, .xlsx, or .csv BOM file")
+    parser = argparse.ArgumentParser(description="Prepare an AI comparison of project parts and LCSC product data.")
+    parser.add_argument("input", nargs="?", help="Legacy standalone .xls, .xlsx, or .csv BOM input")
+    parser.add_argument("--project-json", type=Path, help="Project JSON to check, or notes for a legacy BOM input")
+    parser.add_argument("--output", type=Path, help="AI check report filename")
+    parser.add_argument("--project-directory", type=Path, help="Original project folder for legacy product-cache migration")
     parser.add_argument("--sleep", type=float, default=0.2, help="Seconds to sleep between downloads")
     parser.add_argument(
         "--scrape-only",
@@ -392,37 +451,62 @@ def main():
     )
     args = parser.parse_args()
 
-    input_path = Path(args.input)
+    if not args.input and not args.project_json:
+        parser.error("Provide --project-json or a standalone BOM input.")
+    internal = not args.input
+    input_path = args.project_json if internal else Path(args.input)
     if not input_path.exists():
-        print(f"Input file not found: {input_path}", file=sys.stderr)
+        print(f"ERROR: Input file not found: {input_path}", file=sys.stderr)
         return 1
 
-    ext = input_path.suffix.lower()
-    if ext == ".csv":
-        rows = _read_csv_rows(input_path)
-    elif ext in (".xls", ".xlsx"):
-        rows = _read_excel_rows(input_path)
+    note_records = {}
+    if internal:
+        print("CHECK_STAGE: Reading current project…", flush=True)
+        try:
+            note_records = load_check_notes(input_path)
+            rows = project_check_rows(note_records)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"ERROR: Invalid project or normalization rules: {exc}", file=sys.stderr)
+            return 1
+        if not rows:
+            print("ERROR: No non-excluded parts to check.")
+            return 1
     else:
-        print(f"Unsupported file extension: {ext}", file=sys.stderr)
-        return 1
+        ext = input_path.suffix.lower()
+        print("CHECK_STAGE: Reading workbook…", flush=True)
+        if ext == ".csv":
+            rows = _read_csv_rows(input_path, with_designators=True)
+        elif ext in (".xls", ".xlsx"):
+            rows = _read_excel_rows(input_path, with_designators=True)
+        else:
+            print(f"ERROR: Unsupported file extension: {ext}", file=sys.stderr)
+            return 1
 
     parts = _normalize_parts([r[1] for r in rows])
+    print(f"CHECK_TOTAL: {len(parts)}", flush=True)
     if not parts:
-        print("No C-part numbers found in last column.")
-        return 0
+        if not internal:
+            print("ERROR: No C-part numbers found in last column.")
+            return 1
+        print("No assigned LCSC numbers; the report will list unassigned parts.")
 
+    print("CHECK_STAGE: Loading check settings and notes…", flush=True)
     try:
         instruction_lines = load_ai_instructions()
-    except (OSError, ValueError) as exc:
-        print(f"Invalid AI check settings: {exc}", file=sys.stderr)
+        if not internal and args.project_json:
+            note_records = load_check_notes(args.project_json)
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"ERROR: Invalid AI check settings: {exc}", file=sys.stderr)
         return 1
 
     out_dir = cache_directory()
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Shared LCSC cache: {out_dir}")
-    imported, _ = import_local_cache(input_path.parent / "lcsc")
+    print("CHECK_STAGE: Preparing product cache…", flush=True)
+    local_cache = (args.project_directory or input_path.parent) / "lcsc"
+    imported, _ = import_local_cache(local_cache)
     if imported:
-        print(f"Imported {imported} cached files from {input_path.parent / 'lcsc'}")
+        print(f"Imported {imported} cached files from {local_cache}")
 
     downloaded = 0
     skipped = 0
@@ -457,55 +541,72 @@ def main():
             print(f"{part}: scrape failed: {exc}", file=sys.stderr)
 
     # Output verification text file
-    verify_path = input_path.with_suffix(".txt")
+    print("CHECK_STAGE: Writing check reports…", flush=True)
+    verify_path = args.output or (input_path.with_name(input_path.stem + "_AI_Check.txt")
+                                 if internal else input_path.with_suffix(".txt"))
+    verify_path.parent.mkdir(parents=True, exist_ok=True)
+    rohs_path = verify_path.with_suffix(".rohs.txt")
+    if input_path.resolve() in {verify_path.resolve(), rohs_path.resolve()}:
+        print("ERROR: Report filenames must differ from the input file.", file=sys.stderr)
+        return 1
     with open(verify_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(instruction_lines) + "\n")
-        f.write("FORMAT: <original_description>\\t<productModel>: <productNameEn>\n")
-        f.write("NOTES: Lines are constructed from column 1 (original description) and the JSON fields productModel/productNameEn for the matching LCSC part number in the last column.\n")
+        f.write("FORMAT: <original_description>\\t<productModel>: <productNameEn> // optional notes\n")
+        if internal:
+            f.write("NOTES: Project descriptions include designators, the selected part's normalized name/value and footprint. Supplier details come from the assigned LCSC number. Project notes may qualify differences. Excluded parts are omitted; unassigned parts are marked for review.\n")
+        else:
+            f.write("NOTES: Lines are constructed from column 1 (original description) and the JSON fields productModel/productNameEn for the matching LCSC part number in the last column.\n")
         f.write("\n")
-        for desc, part in rows:
+        for desc, part, refs in rows:
             part_norm = str(part).strip().upper() if part is not None else ""
             if not part_norm.startswith("C"):
+                if internal:
+                    f.write(verification_line(desc, "", "(no LCSC part number assigned)",
+                                              notes_for_row(note_records, refs, "")))
                 continue
             json_path = out_dir / f"{part_norm}.json"
+            notes = notes_for_row(note_records, refs, part_norm)
             if json_path.exists():
                 model, name = _extract_model_name_from_json(json_path)
                 model = model or ""
                 name = name or ""
-                f.write(f"{desc}\t{model}: {name}\n")
+                f.write(verification_line(desc, model, name, notes))
             else:
-                f.write(f"{desc}\t{part_norm}: (missing json)\n")
+                f.write(verification_line(desc, part_norm, "(missing json)", notes))
 
     # Output RoHS text file
-    rohs_path = input_path.with_suffix(".rohs.txt")
-    rohs_count = 0
-    non_rohs_count = 0
+    rohs_refs = {"compliant": set(), "non_compliant": set(), "unknown": set()}
+    from Shared.references import REFERENCE_RE
     with open(rohs_path, "w", encoding="utf-8", newline="\n") as f:
         f.write("FORMAT: <original_description>\\t<rohs_status>\n")
         f.write("NOTES: RoHS is derived from LCSC isEnvironment or JLCPCB rohsFlag when present.\n")
         f.write("\n")
-        for desc, part in rows:
+        for desc, part, refs in rows:
             part_norm = str(part).strip().upper() if part is not None else ""
+            designators = set(REFERENCE_RE.findall(refs))
             if not part_norm.startswith("C"):
+                if internal:
+                    rohs_refs["unknown"].update(designators)
+                    f.write(f"{desc}\tNot checked (no LCSC part number)\n")
                 continue
             json_path = out_dir / f"{part_norm}.json"
             if json_path.exists():
                 rohs = _extract_rohs_from_json(json_path) or "Unknown"
                 if rohs == "RoHS":
-                    rohs_count += 1
+                    rohs_refs["compliant"].update(designators)
                 elif rohs == "Non-RoHS":
-                    non_rohs_count += 1
+                    rohs_refs["non_compliant"].update(designators)
+                else:
+                    rohs_refs["unknown"].update(designators)
                 f.write(f"{desc}\t{rohs}\n")
             else:
+                rohs_refs["unknown"].update(designators)
                 f.write(f"{desc}\tMissing JSON\n")
 
     print(f"Done. Downloaded: {downloaded}, Skipped: {skipped}, Scraped: {scraped}, Output: {out_dir}")
     print(f"Wrote verification file: {verify_path}")
     print(f"Wrote RoHS file: {rohs_path}")
-    if non_rohs_count > 0:
-        print(f"Warning: Non-RoHS components: {non_rohs_count}")
-    else:
-        print("No Non-RoHS components found")
+    print("CHECK_ROHS: " + json.dumps({key: sorted(refs) for key, refs in rohs_refs.items()}), flush=True)
     return 0
 
 

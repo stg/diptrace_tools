@@ -9,28 +9,89 @@ import sys
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QSettings, QItemSelectionModel, QEvent
-from PySide6.QtGui import QColor, QBrush, QAction, QKeySequence
+from PySide6.QtCore import Qt, QProcess, QTimer, QSettings, QItemSelectionModel, QEvent, QTemporaryFile
+from PySide6.QtGui import QColor, QBrush, QAction, QKeySequence, QTextCursor, QTextCharFormat
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QLabel, QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog,
     QMessageBox, QPlainTextEdit, QProgressBar, QSplitter, QAbstractItemView, QMenu, QComboBox, QDialog,
+    QProxyStyle, QStyle,
+    QStyledItemDelegate,
 )
 
-from bom_editor_core import Project, FIELDS, grouped_rows, record_group_key, REFS, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
+from bom_editor_core import Project, FIELDS, grouped_rows, record_group_key, selected_component, REFS, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
 from bom_alternates_dialog import AlternatesDialog
-from bom_conversions import CPL_ADJUSTMENTS_PATH
+from bom_conversions import CPL_ADJUSTMENTS_PATH, MissingCPLFile
+from bom_conversions import load_normalization_rules
+from Shared.normalization import note_highlight
 from Shared.search import compile_query, matches_terms
-from Shared.platform_helpers import open_file
+from Shared.platform_helpers import open_file, configure_app_icon
 
 RED = QBrush(QColor("#ffe0e0"))
 INK = QBrush(QColor("#9b2424"))
 YELLOW = QBrush(QColor("#fff2cc"))
 WARNING_INK = QBrush(QColor("#805400"))
 HEADERS = ["Designator(s)", "Input · Name", "Input · Value", "Input · Pattern",
-           "JSON · Name", "JSON · Value", "JSON · Pattern", "JSON · JLCPCB",
+           "Name", "Value", "Pattern", "JLCPCB", "Note",
            "Output · Component", "Output · Footprint", "Output · JLCPCB", "Status"]
-EDITABLE = {4: "Name", 5: "Value", 6: "Pattern", 7: "LCSC Part #"}
+EDITABLE = {4: "Name", 5: "Value", 6: "Pattern", 7: "LCSC Part #", 8: "Notes"}
+OUTPUT_COLUMN = 9
+STATUS_COLUMN = 12
+CHECKER_PATH = Path(__file__).with_name("jlcpcb_bom_checker.py")
+
+
+class EditorStyle(QProxyStyle):
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.SH_ToolTip_WakeUpDelay:
+            return 250
+        return super().styleHint(hint, option, widget, returnData)
+
+
+class LogView(QPlainTextEdit):
+    COLORS = {"error": "#9b2424", "warning": "#805400", "success": "#236b39"}
+
+    def append_message(self, message, level=None):
+        text = str(message)
+        if level is None:
+            if re.search(r"^ERROR:|^Failed |scrape failed|missing HTML|^Traceback|\b\w+Error:", text, re.I | re.M):
+                level = "error"
+            elif text.startswith("WARNING:"):
+                level = "warning"
+        color = QColor(self.COLORS[level]) if level else self.palette().text().color()
+        format = QTextCharFormat()
+        format.setForeground(color)
+        scrollbar = self.verticalScrollBar()
+        follow = scrollbar.value() == scrollbar.maximum()
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End)
+        if not self.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(text, format)
+        if follow:
+            scrollbar.setValue(scrollbar.maximum())
+
+    def appendPlainText(self, text):
+        self.append_message(text)
+
+
+def output_span_selected(table, row, column):
+    selection = table.selectionModel()
+    return any(selection.isSelected(table.model().index(member, 0))
+               for member in range(row, row + table.rowSpan(row, column))
+               if not table.isRowHidden(member))
+
+
+class OutputSpanDelegate(QStyledItemDelegate):
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        table = self.parent()
+        if OUTPUT_COLUMN <= index.column() < STATUS_COLUMN:
+            span = table.rowSpan(index.row(), index.column())
+            if span > 1:
+                if output_span_selected(table, index.row(), index.column()):
+                    option.state |= QStyle.State_Selected
+                else:
+                    option.state &= ~QStyle.State_Selected
 
 
 class Editor(QMainWindow):
@@ -44,6 +105,7 @@ class Editor(QMainWindow):
         self.redo_history = []
         self.buffer = ""
         self.check_cancelled = False
+        self.check_input_file = None
         self.settings = QSettings("DevSound", "JLCPCBBOMEditor")
         if not self.settings.allKeys():
             legacy_settings = QSettings("DevSound", "DipTraceBOMEditor")
@@ -51,10 +113,13 @@ class Editor(QMainWindow):
                 self.settings.setValue(key, legacy_settings.value(key))
             self.settings.setValue("legacy_settings_imported", True)
             self.settings.sync()
+        legacy_columns = self.settings.value("column_layout_version", 0, type=int) < 1
         try:
             saved_sort = json.loads(self.settings.value("sort_columns", "[]", type=str))
-            self.sort_columns = [(column, descending) for column, descending in saved_sort
-                                 if type(column) is int and 0 <= column < len(HEADERS) and type(descending) is bool]
+            self.sort_columns = [(column + (1 if legacy_columns and column >= 8 else 0), descending)
+                                 for column, descending in saved_sort
+                                 if type(column) is int and 0 <= column < len(HEADERS) - int(legacy_columns)
+                                 and type(descending) is bool]
         except (TypeError, ValueError):
             self.sort_columns = []
         self.resize(1600, 900)
@@ -67,6 +132,7 @@ class Editor(QMainWindow):
         layout.addLayout(toolbar)
         self.buttons = {}
         for name, handler in [
+            ("Reload", self.reload),
             ("Expand selected group", self.expand_selected),
             ("Compact identical", self.compact_identical),
             ("Generate outputs", self.generate),
@@ -84,7 +150,7 @@ class Editor(QMainWindow):
         self.filter = QLineEdit()
         self.filter.setClearButtonEnabled(True)
         self.filter.installEventFilter(self)
-        self.filter.setPlaceholderText("Filter by designator, name, value, footprint, or JLCPCB part number…")
+        self.filter.setPlaceholderText("Filter by designator, name, value, footprint, JLCPCB part number, or note…")
         self.filter.setToolTip("All words must match. Wildcards: * = any text, # = digits, ? = one character.")
         self.filter.textChanged.connect(self.apply_filter)
         row.addWidget(self.filter)
@@ -93,13 +159,15 @@ class Editor(QMainWindow):
         self.splitter = splitter
         layout.addWidget(splitter, 1)
         self.table = QTableWidget(0, len(HEADERS))
+        self.table.setItemDelegate(OutputSpanDelegate(self.table))
         self.table.setHorizontalHeaderLabels(HEADERS)
         for column in range(len(HEADERS) - 1):
-            color = "#e8eef8" if column < 4 else "#fff2cc" if column < 8 else "#e7f1e6"
+            color = "#e8eef8" if column < 4 else "#fff2cc" if column < OUTPUT_COLUMN else "#e7f1e6"
             self.table.horizontalHeaderItem(column).setBackground(QColor(color))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.itemSelectionChanged.connect(self.update_copy_action)
+        self.table.itemSelectionChanged.connect(self.refresh_output_selection)
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
@@ -130,21 +198,33 @@ class Editor(QMainWindow):
         progress_row.addWidget(self.progress, 1)
         progress_row.addWidget(self.cancel_button)
         log_layout.addLayout(progress_row)
-        self.log = QPlainTextEdit()
+        self.log = LogView()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(4000)
         self.log.setPlaceholderText("Output generation and live LCSC check progress appear here.")
         log_layout.addWidget(self.log)
         splitter.addWidget(log_panel)
         splitter.setSizes([650, 180])
-        for column, width in enumerate([175, 170, 155, 145, 170, 155, 145, 115, 250, 135, 115, 240]):
+        for column, width in enumerate([175, 170, 155, 145, 170, 155, 145, 115, 220, 250, 135, 115, 240]):
             self.table.setColumnWidth(column, width)
         geometry = self.settings.value("window_geometry")
         if geometry:
             self.restoreGeometry(geometry)
         header = self.settings.value("column_state")
         if header:
-            self.table.horizontalHeader().restoreState(header)
+            if legacy_columns:
+                previous = QTableWidget(0, len(HEADERS) - 1)
+                if previous.horizontalHeader().restoreState(header):
+                    for column in range(previous.columnCount()):
+                        target = column + (1 if column >= 8 else 0)
+                        self.table.setColumnWidth(target, previous.columnWidth(column))
+                        self.table.setColumnHidden(target, previous.isColumnHidden(column))
+            else:
+                self.table.horizontalHeader().restoreState(header)
+        if legacy_columns:
+            self.settings.setValue("sort_columns", json.dumps(self.sort_columns))
+            self.settings.setValue("column_state", self.table.horizontalHeader().saveState())
+            self.settings.setValue("column_layout_version", 1)
         splitter_state = self.settings.value("splitter_state")
         if splitter_state:
             self.splitter.restoreState(splitter_state)
@@ -193,7 +273,7 @@ class Editor(QMainWindow):
         action(tools_menu, "Generate outputs", self.generate)
         tools_menu.addSeparator()
         action(tools_menu, "JLCPCB part numbers from XLS(X)…", self.import_lcsc)
-        action(tools_menu, "Check JLCPCB BOM from XLS(X)…", self.check_lcsc)
+        action(tools_menu, "Check with AI", self.check_with_ai)
         tools_menu.addSeparator()
         action(tools_menu, "Open project settings JSON", self.open_project_settings)
         action(tools_menu, "Open new-project defaults", self.open_project_defaults)
@@ -320,12 +400,31 @@ class Editor(QMainWindow):
             for column in range(self.table.columnCount()):
                 widget = self.table.cellWidget(row, column)
                 item = self.table.item(row, column)
-                cells.append(widget.currentText() if isinstance(widget, QComboBox) else item.text() if item else "")
+                original = item.data(Qt.UserRole) if item else None
+                cells.append(widget.currentText() if isinstance(widget, QComboBox)
+                             else original[0] if original else item.text() if item else "")
             lines.append("\t".join(cells))
         QApplication.clipboard().setText("\n".join(lines))
 
     def update_copy_action(self):
         self.actions["Copy selected rows"].setEnabled(self.process is None and bool(self.selected_rows()))
+
+    def refresh_output_selection(self):
+        # Cell widgets paint above delegates, so match their highlight too.
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, OUTPUT_COLUMN)
+            if not widget:
+                continue
+            selected = (self.table.rowSpan(row, OUTPUT_COLUMN) > 1
+                        and output_span_selected(self.table, row, OUTPUT_COLUMN))
+            if selected:
+                palette = self.table.palette()
+                widget.setStyleSheet("QComboBox { background-color: " + palette.highlight().color().name()
+                                    + "; color: " + palette.highlightedText().color().name()
+                                    + "; border: 0; padding: 0 3px; }")
+            else:
+                widget.setStyleSheet(widget.property("unmerged_style") or widget.styleSheet())
+        self.table.viewport().update()
 
     def eventFilter(self, watched, event):
         # The filter is navigation, so its native text undo must not swallow
@@ -379,6 +478,7 @@ class Editor(QMainWindow):
                     groups.setdefault(key, []).append(ref)
                 rows.extend(groups.values())
             self.view_rows = rows
+            self.clear_output_spans()
             self.table.blockSignals(True)
             self.table.setRowCount(len(rows))
             self.table.blockSignals(False)
@@ -462,6 +562,7 @@ class Editor(QMainWindow):
     def apply_sort(self):
         if not self.sort_columns or not self.view_rows:
             return
+        self.clear_output_spans()
         values = {tuple(refs): [self.table.item(row, column).text() for column in range(len(HEADERS))]
                   for row, refs in enumerate(self.view_rows)}
         selected = {ref for row in self.selected_rows() for ref in self.view_rows[row]}
@@ -471,7 +572,7 @@ class Editor(QMainWindow):
         # Python sorts are stable. Apply the least significant column first,
         # keeping previous sorts within ties of each newer primary column.
         for column, descending in reversed(self.sort_columns):
-            key = value_sort_key if column in {2, 5, 8} else natural_sort_key
+            key = value_sort_key if column in {2, 5, OUTPUT_COLUMN} else natural_sort_key
             self.view_rows.sort(key=lambda refs: key(values[tuple(refs)][column]), reverse=descending)
         self.table.blockSignals(True)
         for row in range(len(self.view_rows)):
@@ -546,7 +647,7 @@ class Editor(QMainWindow):
             self.remember_file(project.path)
             self.log.appendPlainText(f"Loaded {len(project.records)} components from {project.path.name}; {len(self.view_rows)} groups.")
             if project.output_errors:
-                self.log.appendPlainText("\n".join(project.output_errors))
+                self.log.append_message("\n".join(project.output_errors), "error")
             self.update_controls()
             return True
         except Exception as exc:
@@ -558,6 +659,7 @@ class Editor(QMainWindow):
             self.open_path(self.project.path)
 
     def rebuild(self):
+        self.clear_output_spans()
         self.view_rows = []
         for row in grouped_rows(self.project.records):
             refs = REFS.findall(row["RefDes"])
@@ -575,7 +677,7 @@ class Editor(QMainWindow):
         self.update_status()
 
     def fill_row(self, index):
-        self.table.removeCellWidget(index, 8)
+        self.table.removeCellWidget(index, OUTPUT_COLUMN)
         refs = self.view_rows[index]
         project = self.project
         status = []
@@ -593,6 +695,8 @@ class Editor(QMainWindow):
                 cell.setBackground(YELLOW if warning else RED)
                 cell.setForeground(WARNING_INK if warning else INK)
             cell.setToolTip(tooltip or text)
+            if OUTPUT_COLUMN <= column < STATUS_COLUMN:
+                cell.setData(Qt.UserRole, (cell.text(), cell.toolTip(), cell.background(), cell.foreground()))
             self.table.setItem(index, column, cell)
 
         def display(values):
@@ -627,12 +731,24 @@ class Editor(QMainWindow):
                 source_warnings.append(f"{field} suffix" if field in {"Name", "Value"} else field)
             source_critical_mismatch |= mismatch and not warning
             item(column, display(values), mismatch, "\n".join(f"{ref}: {value}" for ref, value in zip(refs, values)), warning=warning)
-        for column, field in [(4, "Name"), (5, "Value"), (6, "Pattern"), (7, "LCSC Part #")]:
-            values = [project.records[ref][field] for ref in refs]
+        for column, field in EDITABLE.items():
+            values = [project.records[ref].get(field, "") for ref in refs]
             item(column, display(values), False, "\n".join(f"{ref}: {value}" for ref, value in zip(refs, values)))
+        rules = load_normalization_rules()
+        note_styles = []
+        for ref in refs:
+            record = project.records[ref]
+            style = note_highlight(record.get("Notes", ""), rules, name=record["Name"],
+                                   value=record["Value"], pattern=record["Pattern"], refdes=ref)
+            if style:
+                note_styles.append(style)
+        note_red = any(style["color"] == "red" for style in note_styles)
+        if note_styles:
+            self.table.item(index, 8).setBackground(RED if note_red else YELLOW)
+            self.table.item(index, 8).setForeground(INK if note_red else WARNING_INK)
         expected = {ref: output_record(ref, project.records[ref]) for ref in refs}
-        for column, field in [(8, "Comment"), (9, "Footprint"), (10, "JLCPCB Part #（optional）")]:
-            values = [expected[ref][field] if expected[ref] is not None else "(excluded by rules)" for ref in refs]
+        for column, field in enumerate(("Comment", "Footprint", "JLCPCB Part #（optional）"), OUTPUT_COLUMN):
+            values = [expected[ref][field] if expected[ref] is not None else "" for ref in refs]
             shown_values = []
             mismatch = False
             tips = []
@@ -663,23 +779,25 @@ class Editor(QMainWindow):
             output_mismatch |= mismatch
             tooltip = "Expected: " + display(values) + "\n" + "\n".join(tips)
             item(column, display(shown_values), mismatch or using_alternate, tooltip, warning=using_alternate)
-            if column == 8 and project.records[refs[0]].get("Alternates"):
+            if column == OUTPUT_COLUMN and project.records[refs[0]].get("Alternates"):
                 record = project.records[refs[0]]
                 combo = QComboBox(self.table)
                 for selection in range(len(record["Alternates"]) + 1):
                     candidate = {**record, "Output selection": selection}
                     converted = output_record(refs[0], candidate)
                     component = record if selection == 0 else record["Alternates"][selection - 1]
-                    label = component["Name"] or (converted["Comment"] if converted else "(excluded by rules)") or "(unnamed)"
+                    label = component["Name"] or (converted["Comment"] if converted else "") or "(unnamed)"
                     combo.addItem(("Alt: " if selection else "") + label)
                     combo.setItemData(selection, " · ".join(component.get(key, "") for key in (*FIELDS, "Notes") if component.get(key)), Qt.ToolTipRole)
                 combo.setCurrentIndex(record.get("Output selection", 0))
                 combo.setToolTip("Selected for next generation: " + combo.currentText() + "\n" + tooltip)
+                combo.setProperty("unmerged_tooltip", combo.toolTip())
                 if using_alternate:
                     background, foreground = "#fff2cc", "#805400"
                 else:
                     background, foreground = ("#ffe0e0", "#9b2424") if mismatch else ("#e7f1e6", "#202020")
                 combo.setStyleSheet(f"QComboBox {{ background-color: {background}; color: {foreground}; border: 0; padding: 0 3px; }}")
+                combo.setProperty("unmerged_style", combo.styleSheet())
                 combo.activated.connect(lambda selection, selected_refs=tuple(refs): self.select_output_component(selected_refs, selection))
                 combo.setContextMenuPolicy(Qt.CustomContextMenu)
                 combo.customContextMenuRequested.connect(
@@ -699,8 +817,9 @@ class Editor(QMainWindow):
             status.extend(f"{field} differs" for field in source_warnings)
         if using_alternate:
             status.append("Alternate selected")
-        item(11, ", ".join(status), source_mismatch or output_mismatch or using_alternate,
-             warning=not source_critical_mismatch and (not output_mismatch or using_alternate))
+        status.extend(dict.fromkeys(style["status"] for style in note_styles if style["status"]))
+        item(STATUS_COLUMN, ", ".join(status), source_mismatch or output_mismatch or using_alternate or bool(note_styles),
+             warning=not note_red and not source_critical_mismatch and (not output_mismatch or using_alternate))
 
     def edited(self, cell):
         if cell.column() not in EDITABLE or not self.project:
@@ -719,6 +838,7 @@ class Editor(QMainWindow):
             self.table.blockSignals(True)
             self.fill_row(row)
             self.table.blockSignals(False)
+            self.apply_filter()
 
     def selected_rows(self):
         return sorted({index.row() for index in self.table.selectionModel().selectedRows()})
@@ -786,6 +906,7 @@ class Editor(QMainWindow):
         self.change_content({(ref, "Output selection"): selection for ref in refs}, "Select output component")
 
     def expand_rows_at(self, selected):
+        self.clear_output_spans()
         # Split only selected groups at their existing positions. Do not regroup
         # other rows until Reload.
         for index in reversed(selected):
@@ -822,6 +943,7 @@ class Editor(QMainWindow):
         self.change_content(updates, "Load from schematic")
 
     def repaint_rows(self):
+        self.clear_output_spans()
         self.table.blockSignals(True)
         for i in range(len(self.view_rows)):
             self.fill_row(i)
@@ -831,13 +953,97 @@ class Editor(QMainWindow):
         self.update_status()
 
     def apply_filter(self):
+        self.clear_output_spans()
         terms = compile_query(self.filter.text())
         for i in range(self.table.rowCount()):
             values = [self.table.item(i, c).text() for c in range(self.table.columnCount()) if self.table.item(i, c)]
             alternates = self.project.records[self.view_rows[i][0]].get("Alternates", [])
             values.extend(value for alternate in alternates for value in alternate.values() if isinstance(value, str))
             self.table.setRowHidden(i, not matches_terms(terms, values))
+        self.merge_output_cells()
         self.update_status()
+
+    def clear_output_spans(self):
+        """Restore each row before sorting, filtering or recomputing display spans."""
+        blocked = self.table.blockSignals(True)
+        self.table.clearSpans()
+        for row in range(self.table.rowCount()):
+            for column in range(OUTPUT_COLUMN, STATUS_COLUMN):
+                cell = self.table.item(row, column)
+                original = cell.data(Qt.UserRole) if cell else None
+                if original:
+                    text, tooltip, background, foreground = original
+                    cell.setText(text)
+                    cell.setToolTip(tooltip)
+                    cell.setBackground(background)
+                    cell.setForeground(foreground)
+                widget = self.table.cellWidget(row, column)
+                if widget:
+                    if widget.property("unmerged_tooltip"):
+                        widget.setToolTip(widget.property("unmerged_tooltip"))
+                    if widget.property("unmerged_style"):
+                        widget.setStyleSheet(widget.property("unmerged_style"))
+                    widget.show()
+        self.table.blockSignals(blocked)
+
+    def merge_output_cells(self):
+        if not self.project:
+            return
+        # Match Generate's grouping of selected component fields, ignoring notes
+        # and alternate definitions. Exclusion uses the group's first reference,
+        # as it does during export.
+        keys = {}
+        included = {}
+        for ref in sorted(self.project.records, key=ref_key):
+            component = selected_component(self.project.records[ref])
+            key = tuple(component.get(field, "") for field in FIELDS)
+            keys[ref] = key
+            if key not in included:
+                included[key] = output_record(ref, self.project.records[ref]) is not None
+        runs = []
+        previous_key = None
+        for row, refs in enumerate(self.view_rows):
+            if self.table.isRowHidden(row):
+                continue
+            row_keys = {keys[ref] for ref in refs}
+            key = next(iter(row_keys)) if len(row_keys) == 1 else None
+            if key is None or not included[key]:
+                previous_key = None
+                continue
+            if key != previous_key:
+                runs.append([])
+            runs[-1].append(row)
+            previous_key = key
+        blocked = self.table.blockSignals(True)
+        for rows in runs:
+            if len(rows) < 2:
+                continue
+            first, last = rows[0], rows[-1]
+            refs = [ref for row in rows for ref in self.view_rows[row]]
+            for column in range(OUTPUT_COLUMN, STATUS_COLUMN):
+                cells = [self.table.item(row, column) for row in rows]
+                top = cells[0]
+                texts = list(dict.fromkeys(cell.text() for cell in cells))
+                top.setText(texts[0] if len(texts) == 1 else "(multiple output values)")
+                tooltip = "One generated BOM line: " + ", ".join(refs)
+                tooltip += "\n\n" + "\n\n".join(dict.fromkeys(cell.toolTip() for cell in cells))
+                top.setToolTip(tooltip)
+                if any(cell.background() == RED for cell in cells):
+                    top.setBackground(RED)
+                    top.setForeground(INK)
+                elif any(cell.background() == YELLOW for cell in cells):
+                    top.setBackground(YELLOW)
+                    top.setForeground(WARNING_INK)
+                self.table.setSpan(first, column, last - first + 1, 1)
+                for row in rows[1:]:
+                    widget = self.table.cellWidget(row, column)
+                    if widget:
+                        widget.hide()
+                widget = self.table.cellWidget(first, column)
+                if widget:
+                    widget.setToolTip(tooltip + "\n\nSelection applies to: " + ", ".join(self.view_rows[first]))
+        self.table.blockSignals(blocked)
+        self.refresh_output_selection()
 
     def update_status(self):
         if self.project:
@@ -887,6 +1093,9 @@ class Editor(QMainWindow):
                 else:
                     self.log.appendPlainText("CPL and BOM designator sets match.")
             self.repaint_rows()
+        except MissingCPLFile as exc:
+            self.log.append_message(f"WARNING: {exc}", "warning")
+            QMessageBox.warning(self, "Missing CPL", str(exc))
         except Exception as exc:
             self.error(exc)
 
@@ -955,34 +1164,23 @@ class Editor(QMainWindow):
         except Exception as exc:
             self.error(exc)
 
-    def check_lcsc(self):
+    def check_with_ai(self):
         self.commit_editor()
-        path = self.workbook_picker("Select workbook to check LCSC parts")
-        if not path:
+        if not self.project or self.process:
             return
         try:
-            script = self.project.checker_path()
-            self.check_path = Path(path)
+            script = CHECKER_PATH
+            self.check_report_path = self.project.ai_check_path
             self.check_cancelled = False
             self.buffer = ""
             self.download_seen = set()
             self.scrape_seen = set()
             self.total_parts = 0
             self.check_error_count = 0
-            # Read using the checker's existing parsing to measure its actual
-            # workload, including its original workbook format.
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("bom_checker", script)
-            checker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(checker)
-            self.checker_module = checker
-            self.total_parts = len(checker._normalize_parts([row[1] for row in checker._read_excel_rows(path)]))
-            if not self.total_parts:
-                raise ValueError("No LCSC part numbers found in the selected workbook.")
-            self.progress.setRange(0, self.total_parts * 2)
-            self.progress.setValue(0)
-            self.progress_label.setText(f"Checking {self.total_parts} parts…")
-            self.log.appendPlainText(f"Checking {path}\nRunning existing checker: {script}")
+            self.check_rohs_result = None
+            self.progress.setRange(0, 0)
+            self.progress_label.setText("Preparing check…")
+            self.log.appendPlainText(f"Checking current project: {self.project.path.name}")
             process = QProcess(self)
             self.process = process
             process.setProcessChannelMode(QProcess.MergedChannels)
@@ -993,10 +1191,33 @@ class Editor(QMainWindow):
             python = Path(sys.executable)
             if python.name.lower() == "pythonw.exe":
                 python = python.with_name("python.exe")
-            process.start(str(python), ["-u", str(script), str(path)])
+            self.check_input_file = QTemporaryFile(self)
+            if not self.check_input_file.open():
+                raise OSError("Could not prepare the project for the AI check.")
+            snapshot = json.dumps({"schema_version": 1, "rows": grouped_rows(self.project.records)}, ensure_ascii=False).encode("utf-8")
+            if self.check_input_file.write(snapshot) != len(snapshot):
+                raise OSError("Could not write the project snapshot for the AI check.")
+            self.check_input_file.close()
+            arguments = ["-X", "utf8", "-u", str(script), "--project-json", self.check_input_file.fileName(),
+                         "--output", str(self.check_report_path),
+                         "--project-directory", str(self.project.path.parent)]
+            process.start(str(python), arguments)
             self.update_controls()
         except Exception as exc:
+            self.clear_check_input()
+            if self.process is not None and self.process.state() == QProcess.NotRunning:
+                self.process.deleteLater()
+                self.process = None
+                self.update_controls()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress_label.setText("Check failed — see log")
             self.error(exc)
+
+    def clear_check_input(self):
+        if self.check_input_file is not None:
+            self.check_input_file.deleteLater()
+            self.check_input_file = None
 
     def check_output(self):
         self.buffer += bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -1006,6 +1227,29 @@ class Editor(QMainWindow):
             self.handle_check_line(line.rstrip("\r"))
 
     def handle_check_line(self, line):
+        if line.startswith("CHECK_STAGE: "):
+            stage = line.removeprefix("CHECK_STAGE: ")
+            self.log.appendPlainText(stage)
+            self.progress.setRange(0, 0)
+            self.progress_label.setText(stage)
+            return
+        total = re.fullmatch(r"CHECK_TOTAL: (\d+)", line)
+        if total:
+            self.total_parts = int(total[1])
+            self.log.appendPlainText(f"Found {self.total_parts} unique parts.")
+            return
+        if line.startswith("CHECK_ROHS: "):
+            try:
+                result = json.loads(line.removeprefix("CHECK_ROHS: "))
+                if not isinstance(result, dict) or any(not isinstance(result.get(key), list)
+                        or any(not isinstance(ref, str) for ref in result[key])
+                        for key in ("compliant", "non_compliant", "unknown")):
+                    raise ValueError("Invalid RoHS summary")
+                self.check_rohs_result = result
+            except (ValueError, TypeError):
+                self.log.append_message("ERROR: Invalid RoHS verification result; compliance is unknown.", "error")
+                self.check_rohs_result = None
+            return
         self.log.appendPlainText(line)
         match = re.match(r"(C\d+): (.*)", line)
         if match:
@@ -1014,7 +1258,9 @@ class Editor(QMainWindow):
                 self.download_seen.add(part)
             if "already have JSON" in message or "scraping HTML" in message or "missing HTML" in message:
                 self.scrape_seen.add(part)
-            self.progress.setValue(len(self.download_seen) + len(self.scrape_seen))
+            if self.total_parts:
+                self.progress.setRange(0, self.total_parts * 2)
+                self.progress.setValue(len(self.download_seen) + len(self.scrape_seen))
             self.progress_label.setText(f"{part}: {message}")
         if "Failed " in line or "scrape failed" in line or "missing HTML" in line:
             self.check_error_count += 1
@@ -1022,28 +1268,36 @@ class Editor(QMainWindow):
     def check_process_error(self, error):
         if error == QProcess.FailedToStart:
             self.log.appendPlainText("ERROR: Could not start the LCSC checker.")
+            self.clear_check_input()
             self.process = None
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.progress_label.setText("Check failed — see log")
             self.update_controls()
 
     def check_finished(self, code, status):
         self.check_output()
+        self.clear_check_input()
         if self.buffer:
             self.handle_check_line(self.buffer)
             self.buffer = ""
         self.process.deleteLater()
         self.process = None
         self.update_controls()
+        self.progress.setRange(0, max(1, self.total_parts * 2))
         if self.check_cancelled:
+            self.progress.setValue(0)
             self.progress_label.setText("Check stopped")
             return
         if code != 0:
+            self.progress.setValue(0)
             self.progress_label.setText("Check failed — see log")
             self.error(f"LCSC checker exited with code {code}. See the progress log.")
             return
         self.progress.setValue(self.progress.maximum())
         self.progress_label.setText("Check completed" if not self.check_error_count else "Check completed with download/scrape errors — see log")
         self.warn_non_rohs()
-        report = self.check_path.with_suffix(".txt")
+        report = self.check_report_path
         if report.exists():
             self.log.appendPlainText(f"Opening {report}")
             try:
@@ -1052,24 +1306,23 @@ class Editor(QMainWindow):
                 self.error(exc)
 
     def warn_non_rohs(self):
-        try:
-            assignments = read_assignments(self.check_path)
-            non_rohs = []
-            for ref, part in assignments.items():
-                cache = self.checker_module.cache_directory() / f"{part}.json"
-                if cache.exists() and self.checker_module._extract_rohs_from_json(cache) == "Non-RoHS":
-                    non_rohs.append(ref)
-            if non_rohs:
-                message = "List contains non-RoHS: " + ", ".join(sorted(non_rohs, key=ref_key))
-                self.log.appendPlainText(message)
-                QMessageBox.warning(self, "Non-RoHS components", message)
-        except Exception as exc:
-            # Legacy checker workbooks may not have a Designator column.
-            # Still show a warning when its report identifies non-RoHS parts.
-            self.log.appendPlainText(f"Could not map RoHS results to designators: {exc}")
-            if "Warning: Non-RoHS components:" in self.log.toPlainText().split(f"Checking {self.check_path}")[-1]:
-                QMessageBox.warning(self, "Non-RoHS components",
-                                    "List contains non-RoHS: designators unavailable in this workbook. See the RoHS report.")
+        result = self.check_rohs_result
+        if result is None:
+            self.log.append_message("ERROR: RoHS verification result unavailable.", "error")
+            return
+        compliant, non_compliant, unknown = (result[key] for key in ("compliant", "non_compliant", "unknown"))
+        if non_compliant:
+            message = "List contains non-RoHS: " + ", ".join(sorted(non_compliant, key=ref_key))
+            self.log.append_message(message, "error")
+            QMessageBox.warning(self, "Non-RoHS components", message)
+        elif compliant and not unknown:
+            self.log.append_message(f"RoHS: all {len(compliant)} checked parts confirmed compliant.", "success")
+        elif compliant:
+            self.log.appendPlainText(f"RoHS: {len(compliant)} parts confirmed compliant; verification incomplete.")
+        if unknown:
+            self.log.append_message("RoHS data missing or unknown: " + ", ".join(sorted(unknown, key=ref_key)), "warning")
+        elif not compliant and not non_compliant:
+            self.log.appendPlainText("RoHS: no parts checked.")
 
     def cancel_check(self):
         if self.process:
@@ -1115,7 +1368,8 @@ def main():
     parser.add_argument("schematic", nargs="?", type=Path, help="Optional .dchxml to open")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
-    app.setStyle("Fusion")
+    configure_app_icon(app, "jlcpcb_bom")
+    app.setStyle(EditorStyle("Fusion"))
     window = Editor(args.schematic)
     window.show()
     return app.exec()

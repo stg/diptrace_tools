@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 32 32">
+  <title>DipTrace Tools - Part DB</title>
+  <rect x="1" y="1" width="30" height="30" rx="6" fill="#142b3c"/>
+  <g fill="#ffc67a">
+    <rect x="6" y="6" width="20" height="8" rx="1"/>
+    <rect x="6" y="18" width="20" height="8" rx="1"/>
+  </g>
+  <path d="M13 9h6v2h-6zm0 12h6v2h-6z" fill="#142b3c"/>
+</svg>

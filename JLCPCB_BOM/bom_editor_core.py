@@ -21,7 +21,8 @@ from project_config import project_defaults, validate_filename
 from bom_values import SI_PREFIX_EXPONENTS, engineering_magnitude, natural_sort_key, value_sort_key
 
 FIELDS = ("Name", "Value", "Pattern", "LCSC Part #")
-ALTERNATE_FIELDS = FIELDS + ("Notes",)
+JSON_FIELDS = FIELDS + ("Notes",)
+ALTERNATE_FIELDS = JSON_FIELDS
 REFS = conversion.REFERENCE_RE
 PART = re.compile(r"C\d+", re.I)
 
@@ -112,7 +113,7 @@ def read_schematic(path):
 
 
 def record_group_key(record, include_lcsc=True):
-    fields = FIELDS if include_lcsc else FIELDS[:3]
+    fields = JSON_FIELDS if include_lcsc else FIELDS[:3]
     key = tuple(record.get(field, "") for field in fields)
     if include_lcsc:
         key += (json.dumps(record.get("Alternates", []), ensure_ascii=False, sort_keys=True),
@@ -122,7 +123,7 @@ def record_group_key(record, include_lcsc=True):
 
 def grouped_rows(records, include_lcsc=True):
     groups = OrderedDict()
-    fields = FIELDS if include_lcsc else FIELDS[:3]
+    fields = JSON_FIELDS if include_lcsc else FIELDS[:3]
     for ref in sorted(records, key=ref_key):
         row = records[ref]
         key = record_group_key(row, include_lcsc)
@@ -148,7 +149,7 @@ def expand_rows(rows):
             ref = ref.upper()
             if ref in records:
                 raise ValueError(f"Duplicate JSON designator: {ref}")
-            record = {field: str(row.get(field, "") or "") for field in FIELDS}
+            record = {field: str(row.get(field, "") or "") for field in JSON_FIELDS}
             validate_lcsc(record["LCSC Part #"])
             alternates = row.get("Alternates", [])
             if not isinstance(alternates, list) or any(not isinstance(alt, dict) for alt in alternates):
@@ -278,7 +279,7 @@ class Project:
         else:
             self.document = {**project_defaults(self.path.stem), "schema_version": 1,
                              "source": self.path.name, "rows": []}
-            self.records = {ref: {**row, "Alternates": [], "Output selection": 0}
+            self.records = {ref: {**row, "Notes": "", "Alternates": [], "Output selection": 0}
                             for ref, row in self.source.items()}
             self.save()
         self.saved_state = self.state()
@@ -286,7 +287,7 @@ class Project:
         # including edited patterns, remain authoritative on reload.
         for ref, row in self.source.items():
             if ref not in self.records:
-                self.records[ref] = {**row, "Alternates": [], "Output selection": 0}
+                self.records[ref] = {**row, "Notes": "", "Alternates": [], "Output selection": 0}
         self.refresh_outputs()
         self.cpl_report = None
 
@@ -304,6 +305,14 @@ class Project:
     def cpl_xls(self):
         filename = self.document.get("cpl_output_file", f"{self.path.stem}_CPL.xls")
         return self.output_dir / validate_filename(filename, "cpl_output_file", xls=True)
+
+    @property
+    def ai_check_path(self):
+        filename = self.document.get("ai_check_file", f"{self.path.stem}_AI_Check.txt")
+        validate_filename(filename, "ai_check_file")
+        if Path(filename).suffix.lower() != ".txt":
+            raise ValueError("ai_check_file must end in .txt.")
+        return self.output_dir / filename
 
     @property
     def cpl_path(self):
@@ -422,16 +431,3 @@ class Project:
         self.source_hash = fingerprint(self.path)
         self.save()
         return changes, backup
-
-    def checker_path(self):
-        configured = self.document.get("checker_script")
-        if configured:
-            candidate = Path(configured)
-            if not candidate.is_absolute():
-                candidate = self.path.parent / candidate
-            if candidate.exists():
-                return candidate
-        candidate = Path(__file__).resolve().with_name("jlcpcb_bom_checker.py")
-        if candidate.is_file():
-            return candidate
-        raise ValueError("LCSC checker not found. Set checker_script in the sidecar JSON to its full path.")

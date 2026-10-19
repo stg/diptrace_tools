@@ -10,19 +10,19 @@ Three desktop tools for reusing DipTrace designs, preparing assembly orders and 
 
 **Part_DB** tracks historical use of parts, with optional storage locations. It helps you find parts used in the past, where they are stored, and which projects used them.
 
-## JLCPCB_BOM
+## <img src="Shared/icons/jlcpcb_bom.png" width="28" height="28" alt=""> JLCPCB_BOM
 
 - **Maintain a BOM through the whole ordering cycle.** Bring schematic data into editable JSON, generate JLCPCB files, read back selected part numbers, and back-annotate edited Name/Value fields into DipTrace.
 - **Keep primary parts and alternatives under control.** Save part choices and substitutes, then select which ones go into the next assembly order.
 - **Generate consistent BOM and placement files together.** Part choices, normalization, exclusion rules and footprint corrections feed the assembly outputs; excluded parts disappear from both BOM and CPL.
 - **See differences before ordering.** Compare the schematic, edited project data and generated BOM side by side, with mismatches highlighted.
-- **Verify the actual supplier selection.** Read either JLCPCB workbook style and prepare product data plus configurable instructions for an AI checking pass, alongside RoHS information.
+- **Check your selected parts with AI.** Prepare supplier data and configurable AI instructions directly from the current project, including unsaved edits, alternatives, footprints and notes, alongside RoHS information.
 
 Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor.cmd)**. Export a DipTrace XML schematic and a placement CSV in mm, inches or mils. **Help → How to use** explains the ordering and back-annotation workflow.
 
 <img src="jlcpcb_bom_screen.png" alt="JLCPCB_BOM" width="720">
 
-## PCB_Layout
+## <img src="Shared/icons/pcb_layout.png" width="28" height="28" alt=""> PCB_Layout
 
 - **Check whether a placement has room to assemble.** Use custom body sizes and a minimum placement gap to reveal crowded parts, with component outline or silkscreen fallbacks.
 - **Edit one group and generate or update the rest.** Replicate complex placement patterns together with internal routing and vias, preserving destination nets when updating existing groups.
@@ -34,7 +34,7 @@ Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a 
 
 The central [component_sizes.json](PCB_Layout/component_sizes.json) starts with 0402 (1.05 × 0.55 mm), SOT23 (3.05 × 1.4 mm, 90° correction), and 0805 (2.2 × 1.4 mm) body rectangles from the reference viewer. Right-click a part to define a pattern, name, or combined match. Priority is **pattern < name < pattern + name**. Bodies are centered on the footprint origin, with optional additional X/Y offsets. The initial body gap is 0.2 mm; dimensions and gap can be changed. These are body checks, excluding pads and leads. Outline/silkscreen fallback checks are estimates.
 
-## Part_DB
+## <img src="Shared/icons/part_db.png" width="28" height="28" alt=""> Part_DB
 
 - **Turn design history into a reusable part library.** Find parts used in earlier designs and trace them to the exact projects, files and designators.
 - **Find the physical parts too.** Keep drawer numbers or other storage labels beside each part, independently of schematic refreshes.
@@ -62,6 +62,8 @@ Explicit resistance links such as `L5 = 0R` retain resistance units. Case-sensit
 
 The default exclusion expressions treat spaces, tabs, slashes or field boundaries as token boundaries. They are rules in JSON, not fixed program decisions. Edit or disable them if your project conventions differ. Part_DB retains excluded assembly parts in its search database.
 
+JLCPCB_BOM highlights notes containing `!` in red (“Note requires attention”) and `?` in yellow (“Note needs review”), with red taking priority. The color and message also appear in Status. These expressions, colors and messages are configurable in its normalization rules file.
+
 See [the rule-language reference](Shared/NORMALIZATION.txt) for syntax and examples. Refresh Part_DB after changing its rules; regenerate JLCPCB outputs after changing theirs.
 
 ### JLCPCB project settings
@@ -74,6 +76,7 @@ See [the rule-language reference](Shared/NORMALIZATION.txt) for syntax and examp
 | `cpl_file` | `{stem}_CPL.csv` |
 | `bom_file` | `{stem}_BOM.xls` |
 | `cpl_output_file` | `{stem}_CPL.xls` |
+| `ai_check_file` | `{stem}_AI_Check.txt` |
 | `cpl_decimals` | `3` |
 
 **Tools → Open new-project defaults** changes these creation-time templates; existing projects retain their settings. Older project JSON files without output-name settings retain their previous filename conventions. Source CPL filenames must stay beside the schematic, and output filenames must end in `.xls`.
@@ -113,3 +116,5 @@ PCB_Layout keeps recent/window preferences in `PCB_Layout/settings.json`, body d
 DipTrace-ReverseEngineer is excluded from this repository. Part_DB includes the extracted structural parser it needs, so that source project is unnecessary at runtime. The detailed per-tool READMEs remain available for implementation and behavior reference.
 
 The root screenshots are displayed at 720 pixels wide with their original proportions; the original image files are unchanged.
+
+The applications share a family of [SVG icons](Shared/icons/README.md), with derived PNG, Windows ICO and macOS ICNS resources. Windows apps and shortcuts use the ICO files; macOS/Linux windows use the matching PNG.

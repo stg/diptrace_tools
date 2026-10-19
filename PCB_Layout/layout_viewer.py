@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
-from Shared.platform_helpers import open_file
+from Shared.platform_helpers import open_file, configure_app_icon
 from layout_core import (APP_DIR, SIZES_PATH, SETTINGS_PATH, DEFAULTS_PATH, Board, default_recipe,
                          group_refs, refs, load_sizes, size_match, polygon_gap,
                          replicate, intervals, write_json, migrate_view, migrate_replication)
@@ -923,6 +923,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('pcb_or_recipe',nargs='?'); args = parser.parse_args()
     app = QApplication(sys.argv[:1]); app.setStyle('Fusion')
+    configure_app_icon(app, 'pcb_layout')
     if sys.platform == 'win32':
         app.setFont(QFont('Segoe UI',9))
     window = Viewer(args.pcb_or_recipe); window.show(); return app.exec()
