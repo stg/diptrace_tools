@@ -40,9 +40,9 @@ def name_has_added_suffix(input_name, json_name):
 
 
 def value_has_added_suffix(input_value, json_value):
-    """Extra JSON detail is a warning only when every original word is retained."""
+    """Added JSON detail warns when every original word is retained, including blanks."""
     original, edited = input_value.casefold().split(), json_value.casefold().split()
-    return bool(original) and len(edited) > len(original) and edited[:len(original)] == original
+    return len(edited) > len(original) and edited[:len(original)] == original
 
 
 def pattern_difference_is_warning(input_pattern, json_pattern):
