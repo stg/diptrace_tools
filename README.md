@@ -104,6 +104,8 @@ Files open with the system's default application. Install or associate a suitabl
 
 Settings remain separate: Part_DB stores its preferences in `Part_DB/settings.json`; JLCPCB_BOM uses Qt's per-user settings (Windows registry, macOS preferences, or a Linux configuration file). Part_DB's `parts.json` and `part_locations.json` are local user data and are excluded from Git, along with supplier caches and generated reports.
 
+Project JSON, schematic/PCB files and BOM/CPL exports are ignored by Git throughout the repository. Only the explicitly listed shipped JSON configuration files are tracked. The README screenshots show example project data.
+
 PCB_Layout keeps recent/window preferences in `PCB_Layout/settings.json`, body dimensions in its central `component_sizes.json`, and study settings in user-named recipe JSON files. Opening a PCB prompts for a recipe filename; opening that recipe restores its PCB, groups and arrangement. Exported PCB XML must be re-imported into DipTrace. Outlines, pours and board graphics are retained rather than repeated with a group.
 
 [PCB_Layout project defaults](PCB_Layout/project_defaults.json), available under Tools, are copied into new recipes. Changing those templates does not change an existing study.

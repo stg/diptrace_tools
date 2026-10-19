@@ -3,6 +3,25 @@ __pycache__/
 *.py[cod]
 *.error.log
 *.json.tmp
+# Keep design files, exports and project data local. Only shipped JSON config is tracked.
+*.dch
+*.dchxml
+*.dipxml
+*.pcb
+*.xml
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.bak
+*.json
+!/JLCPCB_BOM/ai_check_settings.json
+!/JLCPCB_BOM/cpl_adjustments.json
+!/JLCPCB_BOM/normalization_rules.json
+!/JLCPCB_BOM/project_defaults.json
+!/PCB_Layout/component_sizes.json
+!/PCB_Layout/project_defaults.json
+!/Part_DB/normalization_rules.json
 /Part_DB/parts.json
 /Part_DB/settings.json
 /Part_DB/part_locations.json
