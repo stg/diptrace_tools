@@ -70,7 +70,7 @@ program before editing it externally; changes load at the next launch.
 
 Normalization rules
 -------------------
-Help -> How to use opens HELP.txt, a short user guide.
+Help -> How to use opens README.md, a short user guide.
 Help -> Normalization rule reference opens Shared/NORMALIZATION.txt, which
 fully documents the ordered rule language, validation and compatibility modes.
 

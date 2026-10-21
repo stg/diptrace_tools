@@ -9,6 +9,8 @@ import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
 from Shared.platform_helpers import open_file, configure_app_icon
+from Shared.markdown_help import show_help
+from Shared.scrolling import protect_values_from_wheel
 from layout_core import (APP_DIR, SIZES_PATH, SETTINGS_PATH, DEFAULTS_PATH, Board, default_recipe,
                          group_refs, refs, load_sizes, size_match, polygon_gap,
                          replicate, intervals, write_json, migrate_view, migrate_replication)
@@ -22,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QGraphicsItem, QSplitter, QFileDialog, QMessageBox, QMenu, QDialog,
     QDialogButtonBox, QLineEdit, QPlainTextEdit, QGroupBox, QStackedWidget, QProgressBar,
     QScrollArea, QInputDialog, QRadioButton, QButtonGroup, QTextEdit, QAbstractSpinBox,
-    QGraphicsItemGroup, QGraphicsOpacityEffect)
+    QGraphicsItemGroup, QGraphicsOpacityEffect, QStyle)
 
 
 GROUP_COLORS = ('#9dd9f3', '#b6e3a4', '#f4cf8c', '#d0b8ed',
@@ -45,6 +47,7 @@ def spin(value, minimum=-100000, maximum=100000, decimals=3):
 class Canvas(QGraphicsView):
     selected = Signal(str)
     context = Signal(str,object)
+    view_changed = Signal()
 
     def __init__(self):
         super().__init__()
@@ -88,6 +91,11 @@ class Canvas(QGraphicsView):
         if .05 < abs(self.transform().m11())*factor < 2000:
             self.scale(factor,factor)
         event.accept()
+        self.view_changed.emit()
+
+    def mouseReleaseEvent(self,event):
+        super().mouseReleaseEvent(event)
+        self.view_changed.emit()
 
     def paintEvent(self,event):
         super().paintEvent(event)
@@ -206,10 +214,12 @@ class PreviewThread(QThread):
 class Viewer(QMainWindow):
     def __init__(self,initial=None):
         super().__init__(); self.resize(1440,850)
+        protect_values_from_wheel(QApplication.instance())
         self.board = None; self.recipe = None; self.recipe_path = None; self.saved = ''
         self.selected = ''; self.display_board = None; self.worker = None; self.preview_board = None
         self.pending_output = None
         self.preview_groups = None; self.preview_key = ''; self.preview_error = ''; self.closing = False
+        self.restore_camera_after_preview = False
         self.sizes = load_sizes()
         try:
             self.preferences = json.loads(SETTINGS_PATH.read_text(encoding='utf-8')) if SETTINGS_PATH.exists() else {}
@@ -217,14 +227,15 @@ class Viewer(QMainWindow):
             self.preferences = {}
         self.preferences.setdefault('schema_version',1)
         self.timer = QTimer(self); self.timer.setSingleShot(True); self.timer.timeout.connect(self.refresh_display)
+        self.session_timer = QTimer(self); self.session_timer.setSingleShot(True); self.session_timer.timeout.connect(self.store_session)
         self.build_ui(); self.create_menus(); self.title()
         QApplication.instance().installEventFilter(self)
         if self.preferences.get('geometry'):
             self.restoreGeometry(QByteArray.fromHex(self.preferences['geometry'].encode()))
-        if self.preferences.get('splitter'):
-            self.splitter.restoreState(QByteArray.fromHex(self.preferences['splitter'].encode()))
         if initial:
-            QTimer.singleShot(0,lambda:self.open_path(Path(initial)))
+            QTimer.singleShot(0,lambda:self.open_initial(Path(initial)))
+        else:
+            QTimer.singleShot(0,self.restore_session)
 
     def build_ui(self):
         root = QWidget(); outer = QVBoxLayout(root); self.setCentralWidget(root)
@@ -261,6 +272,13 @@ class Viewer(QMainWindow):
         self.preview.setEnabled(False)
         outer.addLayout(toolbar)
         self.splitter = QSplitter(); sidebar = QWidget(); side = QVBoxLayout(sidebar)
+        input_row = QHBoxLayout(); self.input_label = QLabel('No PCB loaded'); self.input_label.setWordWrap(True)
+        input_row.addWidget(self.input_label,1)
+        self.reload_button = QToolButton(); input_row.addWidget(self.reload_button)
+        self.revert_button = QToolButton(); input_row.addWidget(self.revert_button)
+        self.relink_button = QPushButton('Relink PCB…'); self.relink_button.setEnabled(False)
+        self.relink_button.setToolTip('Choose another PCB XML for this recipe, keeping its groups and replication settings.')
+        self.relink_button.clicked.connect(self.relink_dialog); input_row.addWidget(self.relink_button); side.addLayout(input_row)
         side.addWidget(QLabel('Part groups'))
         self.group_list = QListWidget(); self.group_list.itemDoubleClicked.connect(lambda _:self.edit_group())
         self.group_list.setContextMenuPolicy(Qt.CustomContextMenu); self.group_list.customContextMenuRequested.connect(self.group_context)
@@ -278,7 +296,10 @@ class Viewer(QMainWindow):
         types.addStretch(); columns.addLayout(types)
         self.layer_widgets = {}; self.layers_form = QVBoxLayout(); columns.addLayout(self.layers_form)
         layers_layout.addLayout(columns)
-        note = QLabel('Placement is always included. Routing is limited to connections within a group on the checked layers.'); note.setWordWrap(True); layers_layout.addWidget(note)
+        self.preserve_skipped = QCheckBox('Preserve skipped connections'); self.preserve_skipped.setChecked(True)
+        self.preserve_skipped.setToolTip('Arrange only: keep existing edge, unmatched and disjoint inter-group routing when no copy fits. If off, remove selected inter-group routing not reproduced by replication.')
+        self.preserve_skipped.toggled.connect(self.change); layers_layout.addWidget(self.preserve_skipped)
+        note = QLabel('Placement is always included. Copy internal routing and repeatable inter-group links on the checked layers.'); note.setWordWrap(True); layers_layout.addWidget(note)
         self.rep_toggle = QToolButton(); self.rep_toggle.setText('Replication'); self.rep_toggle.setCheckable(True)
         self.rep_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); self.rep_toggle.setArrowType(Qt.RightArrow)
         self.rep_toggle.toggled.connect(self.toggle_replication); side.addWidget(self.rep_toggle)
@@ -292,12 +313,30 @@ class Viewer(QMainWindow):
         self.arrangements = QStackedWidget(); self.inputs = {}
         for kind,fields in [('Linear',[('dx','X step (mm)',7.62),('dy','Y step (mm)',0)]),('Grid',[('columns','Columns',2),('rows','Rows',2),('column_dx','Column X step (mm)',7.62),('column_dy','Column Y step (mm)',0),('row_dx','Row X step (mm)',0),('row_dy','Row Y step (mm)',7.62)]),('Rotational',[('center_x','Center X (mm)',0),('center_y','Center Y (mm)',0),('angle_deg','Angle step (°)',45)])]:
             page = QWidget(); form = QFormLayout(page)
+            if kind == 'Grid':
+                self.grid_order = QComboBox(); self.grid_order.addItems(['Row first','Column first'])
+                self.grid_order.setToolTip('Row first fills across columns, then starts another row. Column first fills through rows, then starts another column.')
+                self.grid_order.currentIndexChanged.connect(self.change); form.addRow('Fill order',self.grid_order)
             for key,label,default in fields:
                 if key in ('columns','rows'):
                     box = QSpinBox(); box.setRange(1,1000); box.setValue(default)
                 else:
                     box = spin(default)
                 self.inputs[key] = box; box.valueChanged.connect(self.change); form.addRow(label,box)
+            if kind == 'Grid':
+                options = QHBoxLayout()
+                self.rotate_odd = QCheckBox('Rotate odd'); options.addWidget(self.rotate_odd)
+                self.rotate_axes = {}
+                for axis in ('Columns','Rows'):
+                    button = QRadioButton(axis); self.rotate_axes[axis] = button; options.addWidget(button)
+                    button.toggled.connect(self.change)
+                self.rotate_axes['Rows'].setChecked(True)
+                self.rotate_odd.toggled.connect(self.change)
+                hint = 'Turn every second row or column 180° as a whole, reversing group order too. The first is unchanged.'
+                self.rotate_odd.setToolTip(hint)
+                for button in self.rotate_axes.values():
+                    button.setToolTip(hint)
+                form.addRow(options)
             if kind == 'Rotational':
                 self.auto_angle = QCheckBox('Evenly around 360°'); self.auto_angle.setChecked(True); self.auto_angle.toggled.connect(self.change); form.addRow(self.auto_angle)
             self.arrangements.addWidget(page)
@@ -305,13 +344,17 @@ class Viewer(QMainWindow):
         rep.addRow(self.layers_panel)
         self.rep_note = QLabel(); self.rep_note.setWordWrap(True); rep.addRow(self.rep_note)
         row = QHBoxLayout(); row.addWidget(QLabel('Replicated:'))
-        self.export_button = QPushButton('Save'); self.export_button.clicked.connect(self.export); self.export_button.setEnabled(False); row.addWidget(self.export_button)
-        self.export_as_button = QPushButton('Save as…'); self.export_as_button.clicked.connect(self.export_as); self.export_as_button.setEnabled(False); row.addWidget(self.export_as_button)
+        self.export_button = QPushButton('Export'); self.export_button.clicked.connect(self.export); self.export_button.setEnabled(False); row.addWidget(self.export_button)
+        self.export_as_button = QPushButton('Export as…'); self.export_as_button.clicked.connect(self.export_as); self.export_as_button.setEnabled(False); row.addWidget(self.export_as_button)
+        self.export_button.setToolTip('Calculate replication and export PCB XML (Ctrl+E).')
+        self.export_as_button.setToolTip('Calculate replication and choose an output PCB filename (Ctrl+Shift+E).')
         rep.addRow(row)
         self.rep_panel.hide(); side.addWidget(self.rep_panel)
         side.addStretch()
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(sidebar); scroll.setMinimumWidth(290)
         self.canvas = Canvas(); self.canvas.selected.connect(self.select); self.canvas.context.connect(self.part_context)
+        self.canvas.view_changed.connect(self.schedule_session)
+        self.splitter.splitterMoved.connect(self.schedule_session)
         self.splitter.addWidget(scroll); self.splitter.addWidget(self.canvas); self.splitter.setSizes([310,1100]); outer.addWidget(self.splitter,1)
         self.progress = QProgressBar(); self.progress.hide(); outer.addWidget(self.progress)
         self.summary = QLabel('Open a DipTrace PCB XML or a saved layout recipe.'); outer.addWidget(self.summary)
@@ -325,11 +368,20 @@ class Viewer(QMainWindow):
             return a
         file = self.menuBar().addMenu('&File')
         action(file,'Open PCB / recipe…',self.open_dialog,'Ctrl+O')
+        self.relink_action = action(file,'Relink PCB…',self.relink_dialog); self.relink_action.setEnabled(False)
         self.recent_menu = file.addMenu('Recent files'); self.recent_menu.aboutToShow.connect(self.recent)
-        action(file,'Reload',self.reload,'Ctrl+R'); file.addSeparator()
-        action(file,'Save recipe',self.save); action(file,'Save recipe as…',self.save_as)
-        replicated = file.addMenu('Replicated PCB')
-        action(replicated,'Save',self.export,'Ctrl+S'); action(replicated,'Save as…',self.export_as,'Ctrl+Shift+S')
+        self.reload_pcb_action = action(file,'Reload PCB',self.reload,'Ctrl+R')
+        self.reload_pcb_action.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+        self.reload_pcb_action.setToolTip('Reload the input PCB (Ctrl+R), keeping current groups, settings and view.')
+        self.reload_button.setDefaultAction(self.reload_pcb_action)
+        self.revert_recipe_action = action(file,'Revert recipe…',self.revert_recipe)
+        self.revert_recipe_action.setIcon(self.style().standardIcon(QStyle.SP_DialogResetButton))
+        self.revert_recipe_action.setToolTip('Discard working recipe changes and reload the saved recipe JSON and linked PCB.')
+        self.revert_button.setDefaultAction(self.revert_recipe_action)
+        file.addSeparator()
+        action(file,'Save recipe',self.save,'Ctrl+S'); action(file,'Save recipe as…',self.save_as,'Ctrl+Shift+S')
+        file.addSeparator()
+        action(file,'Export PCB',self.export,'Ctrl+E'); action(file,'Export PCB as…',self.export_as,'Ctrl+Shift+E')
         file.addSeparator(); action(file,'Exit',self.close,'Alt+F4')
         edit = self.menuBar().addMenu('&Edit'); action(edit,'Add group…',self.add_group)
         action(edit,'Edit selected group…',self.edit_group); action(edit,'Remove selected group',self.remove_group)
@@ -342,7 +394,7 @@ class Viewer(QMainWindow):
         action(tools,'Open recipe JSON',lambda:self.open_local(self.recipe_path) if self.recipe_path else self.save_as())
         action(tools,'Open new-recipe defaults',lambda:self.open_local(DEFAULTS_PATH))
         action(tools,'Open component sizes',lambda:self.open_local(SIZES_PATH)); action(tools,'Reload component sizes',self.reload_sizes)
-        help_menu = self.menuBar().addMenu('&Help'); action(help_menu,'How to use',lambda:self.open_local(APP_DIR/'HELP.txt'))
+        help_menu = self.menuBar().addMenu('&Help'); action(help_menu,'How to use',lambda:show_help(self,APP_DIR/'README.md','PCB Layout — How to use'))
 
     def open_local(self,path):
         try:
@@ -358,11 +410,14 @@ class Viewer(QMainWindow):
     def title(self):
         name = self.recipe_path.name if self.recipe_path else self.board.path.name if self.board else ''
         self.setWindowTitle('PCB Layout'+(' — '+name if name else '')+(' *' if self.dirty() else ''))
+        self.reload_pcb_action.setEnabled(self.board is not None)
+        self.revert_recipe_action.setEnabled(self.recipe_path is not None)
 
     def dirty(self):
-        return self.recipe is not None and json.dumps(self.recipe,sort_keys=True) != self.saved
+        return self.recipe is not None and (not self.saved or self.recipe != json.loads(self.saved))
 
     def may_discard(self):
+        self.store_session(persist_project_view=True)
         if not self.dirty():
             return True
         answer = QMessageBox.question(self,'Save recipe?','Save changes to this layout recipe?',QMessageBox.Save|QMessageBox.Discard|QMessageBox.Cancel)
@@ -372,6 +427,41 @@ class Viewer(QMainWindow):
         filename,_ = QFileDialog.getOpenFileName(self,'Open PCB / recipe',self.preferences.get('last_directory',''),'PCB / recipe (*.dipxml *.json);;All files (*)')
         if filename:
             self.open_path(Path(filename))
+
+    def open_initial(self,path):
+        self.restore_session()
+        path = path.resolve()
+        if self.recipe and (path == self.recipe_path or path == self.board.path):
+            return
+        self.open_path(path)
+
+    def relink_dialog(self):
+        if not self.board:
+            return
+        filename,_ = QFileDialog.getOpenFileName(self,'Relink PCB',str(self.board.path),'DipTrace PCB XML (*.dipxml);;All files (*)')
+        if filename:
+            self.relink_to(Path(filename))
+
+    def relink_to(self,path):
+        if not self.recipe:
+            return
+        try:
+            board = Board(path)
+            group_refs(board,self.recipe)  # Validate before changing the loaded project.
+            self.timer.stop()
+            if self.worker:
+                self.worker.requestInterruption()
+            self.board = board; self.recipe['pcb'] = str(board.path)
+            self.recipe['view']['preview'] = False
+            if self.recipe['view'].get('active_layer') not in board.layers:
+                self.recipe['view']['active_layer'] = next(iter(board.layers),None)
+            self.pending_output = None; self.preview_board = None; self.preview_groups = None
+            self.preview_key = ''; self.preview_error = ''; self.selected = ''
+            self.populate(); self.title(); self.refresh_display(); self.fit()
+            self.schedule_session()
+            self.statusBar().showMessage('PCB relinked. Save the recipe to keep the new input link.',10000)
+        except Exception as error:
+            self.error(error)
 
     def open_path(self,path,ask=True):
         if ask and not self.may_discard():
@@ -403,8 +493,14 @@ class Viewer(QMainWindow):
             self.saved = json.dumps(recipe,sort_keys=True) if recipe_path else ''
             self.title()
             self.populate(); self.remember(path); self.refresh_display(); self.fit()
+            self.restore_project_view()
+            if recipe_path is not None:
+                # Initial camera/splitter state is not a user edit, including
+                # when loading an older recipe without saved view geometry.
+                self.capture_project_view(); self.saved = json.dumps(recipe,sort_keys=True)
             if recipe_path is None:
                 self.save_as()
+            self.store_session()
         except Exception as error:
             self.error(error)
 
@@ -420,6 +516,8 @@ class Viewer(QMainWindow):
     def populate(self):
         self.loading = True
         try:
+            self.input_label.setText(self.board.path.name); self.input_label.setToolTip(str(self.board.path))
+            self.relink_button.setEnabled(True); self.relink_action.setEnabled(True)
             self.group_list.clear(); self.rep_fields['source'].clear(); self.show_group.clear(); self.show_group.addItem('All groups')
             for i,g in enumerate(self.recipe['groups']):
                 item = QListWidgetItem(f"{g['name']}  ({len(g['refs'])} parts)"); item.setForeground(color(i).darker(180)); self.group_list.addItem(item)
@@ -451,9 +549,16 @@ class Viewer(QMainWindow):
             for key,box in self.rep_fields.items():
                 box.setCurrentIndex(settings[key]) if key == 'source' else box.setCurrentText(settings[key])
             self.rep_count.setValue(settings['count']); self.auto_angle.setChecked(settings['automatic_angle'])
+            self.rotate_odd.setChecked(settings['rotate_odd'])
+            self.rotate_axes[settings['rotate_odd_axis']].setChecked(True)
+            self.grid_order.setCurrentText(settings['grid_order'])
+            self.preserve_skipped.setChecked(settings['preserve_skipped_routing'])
             for key,box in self.inputs.items():
                 box.setValue(settings[key])
-            self.rep_toggle.setChecked(self.preferences.get('replication_open',False) or self.preview.isChecked())
+            self.rep_toggle.setChecked(self.recipe['view'].get('replication_open',False) or self.preview.isChecked())
+            splitter = self.recipe['view'].get('splitter')
+            if splitter:
+                self.splitter.restoreState(QByteArray.fromHex(splitter.encode()))
         finally:
             self.loading = False
         self.update_controls()
@@ -466,15 +571,19 @@ class Viewer(QMainWindow):
         self.arrangements.setFixedHeight(self.arrangements.currentWidget().sizeHint().height())
         create = self.rep_fields['mode'].currentIndex() == 0
         grid = self.rep_fields['layout'].currentText() == 'Grid'
+        self.preserve_skipped.setEnabled(not create and self.copy_checks['tracks'].isChecked())
         self.count_label.setVisible(create and not grid); self.rep_count.setVisible(create and not grid)
         self.inputs['angle_deg'].setEnabled(not self.auto_angle.isChecked())
+        for button in self.rotate_axes.values():
+            button.setEnabled(self.rotate_odd.isChecked())
         self.rep_note.setText('The source is instance 1. Copies get new RefDes and internal nets.' if create else 'Count comes from your groups. Parts correspond by list order; destination nets are preserved.')
 
     def toggle_replication(self,opened):
         self.rep_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow); self.rep_panel.setVisible(opened)
         self.preview.setEnabled(opened)
         self.rep_action.setChecked(opened) if hasattr(self,'rep_action') else None
-        self.preferences['replication_open'] = opened
+        if self.recipe:
+            self.recipe['view']['replication_open'] = opened
         if not opened and self.preview.isChecked():
             self.pending_output = None
             self.scope_buttons['All'].setChecked(True)
@@ -496,8 +605,12 @@ class Viewer(QMainWindow):
         settings['layers'] = [key for key,box in self.layer_widgets.items() if box.isChecked()]
         settings.update({key:box.currentIndex() if key == 'source' else box.currentText() for key,box in self.rep_fields.items()})
         settings.update(count=self.rep_count.value(),automatic_angle=self.auto_angle.isChecked())
+        settings.update(rotate_odd=self.rotate_odd.isChecked(),rotate_odd_axis=next(axis for axis,button in self.rotate_axes.items() if button.isChecked()))
+        settings['preserve_skipped_routing'] = self.preserve_skipped.isChecked()
+        settings['grid_order'] = self.grid_order.currentText()
         settings.update({key:box.value() for key,box in self.inputs.items()})
         self.update_controls(); self.title(); self.timer.start(180)
+        self.schedule_session()
         if self.preview.isChecked() and not self.rep_toggle.isChecked():
             self.rep_toggle.setChecked(True)
         if mirror_changed:
@@ -528,6 +641,81 @@ class Viewer(QMainWindow):
     def choose_group(self,index):
         if self.recipe and not getattr(self,'loading',False):
             self.recipe['view']['display_group'] = index; self.title(); self.redraw()
+            self.schedule_session()
+
+    def schedule_session(self,*args):
+        if self.recipe and not getattr(self,'loading',False):
+            self.session_timer.start(300)
+
+    def capture_project_view(self):
+        if not self.recipe:
+            return
+        view = self.recipe['view']; view['replication_open'] = self.rep_toggle.isChecked()
+        view['splitter'] = bytes(self.splitter.saveState().toHex()).decode()
+        if self.canvas.scene().items():
+            center = self.canvas.mapToScene(self.canvas.viewport().rect().center())
+            view['camera'] = dict(scale=abs(self.canvas.transform().m11()),x=center.x(),y=center.y())
+
+    def restore_project_view(self):
+        camera = self.recipe['view'].get('camera')
+        if camera:
+            view = self.recipe['view']; scale = float(camera['scale'])
+            if 0 < scale < 100000:
+                sign = -1 if view.get('legacy_rotation_deg') == 180 else 1
+                self.canvas.setTransform(QTransform().scale((-1 if view['mirror'] else 1)*scale*sign,-scale*sign))
+                self.canvas.centerOn(float(camera['x']),float(camera['y']))
+
+    def store_session(self,persist_project_view=False):
+        if not self.recipe or not self.board or getattr(self,'loading',False):
+            return True
+        try:
+            self.session_timer.stop(); self.capture_project_view()
+            # Persist only view choices to a named recipe. Unfinished group and
+            # replication edits stay in the session until an explicit Save.
+            if persist_project_view and self.recipe_path and self.recipe_path.exists():
+                data = json.loads(self.recipe_path.read_text(encoding='utf-8-sig'))
+                if data.get('schema_version') == 1 and isinstance(data.get('pcb'),str):
+                    view = deepcopy(self.recipe['view'])
+                    if data.get('view') != view or data.get('clearance_mm') != self.recipe['clearance_mm']:
+                        data.update(view=view,clearance_mm=self.recipe['clearance_mm']); write_json(self.recipe_path,data)
+                    if self.saved:
+                        baseline = json.loads(self.saved); baseline.update(view=view,clearance_mm=self.recipe['clearance_mm'])
+                        self.saved = json.dumps(baseline,sort_keys=True)
+            write_json(SETTINGS_PATH.with_name('session.json'),dict(schema_version=1,
+                source_pcb=str(self.board.path),recipe_path=str(self.recipe_path) if self.recipe_path else None,
+                recipe=self.recipe,saved_recipe=json.loads(self.saved) if self.saved else None))
+            self.title()
+            return True
+        except Exception as error:
+            self.session_error = str(error)
+            self.statusBar().showMessage(f'Could not save session: {error}',10000)
+            return False
+
+    def restore_session(self):
+        if self.recipe:  # A caller may already have opened a project.
+            return
+        path = SETTINGS_PATH.with_name('session.json')
+        if not path.exists():
+            recent = next((Path(p) for p in self.preferences.get('recent',[]) if Path(p).suffix.lower() == '.json' and Path(p).exists()),None)
+            if recent:
+                self.open_path(recent,ask=False)
+            return
+        try:
+            session = json.loads(path.read_text(encoding='utf-8-sig'))
+            if session.get('schema_version') != 1:
+                raise ValueError('Unsupported session version.')
+            recipe = session['recipe']; board = Board(session['source_pcb']); group_refs(board,recipe)
+            migrate_view(recipe['view']); migrate_replication(recipe,board)
+            self.board,self.recipe = board,recipe
+            self.recipe_path = Path(session['recipe_path']) if session.get('recipe_path') else None
+            baseline = session.get('saved_recipe')
+            if baseline is not None:
+                migrate_view(baseline['view']); migrate_replication(baseline,board)
+            self.saved = json.dumps(baseline,sort_keys=True) if baseline is not None else ''
+            self.restore_camera_after_preview = bool(recipe['view'].get('preview'))
+            self.populate(); self.refresh_display(); self.fit(); self.restore_project_view(); self.title()
+        except Exception as error:
+            self.error(f'Could not restore the previous session: {error}')
 
     def refresh_display(self):
         if not self.board:
@@ -571,6 +759,8 @@ class Viewer(QMainWindow):
         self.refresh_display()
         if self.preview_key == self.key():
             self.fit()
+            if self.restore_camera_after_preview:
+                self.restore_project_view(); self.restore_camera_after_preview = False
             if self.pending_output is not None:
                 output = self.pending_output; self.pending_output = None
                 self.save_replicated_to(output)
@@ -627,14 +817,22 @@ class Viewer(QMainWindow):
             self.collisions,self.origins = collisions,origins
             selected_group = self.show_group.currentIndex()-1
             tracks_count = vias_count = 0
+            combined_route = None; combined_drawn = False
+            if not use_preview and not self.scope_buttons['Source'].isChecked():
+                visible_refs = [r for i,g in enumerate(groups) if selected_group < 0 or selected_group == i for r in g]
+                if self.checks['tracks'].isChecked() or self.checks['vias'].isChecked():
+                    combined_route = board.routing(visible_refs,True,True,set(board.layers))
             for index,group in enumerate(groups):
                 if selected_group >= 0 and selected_group != index:
                     continue
                 tint = color(index)
                 source_group_index = 0 if len(groups) == 1 or (use_preview and self.recipe['replication']['mode'] == 'Create copies') else self.recipe['replication']['source']
                 draw_routes = not self.scope_buttons['Source'].isChecked() or index == source_group_index
+                if combined_route is not None and combined_drawn:
+                    draw_routes = False
                 if draw_routes and (self.checks['tracks'].isChecked() or self.checks['vias'].isChecked()):
-                    route = board.replication_routing[index] if use_preview else board.routing(group,True,True,set(board.layers))
+                    route = board.replication_routing[index] if use_preview else combined_route if combined_route is not None else board.routing(group,True,True,set(board.layers))
+                    combined_drawn = True
                     if self.checks['tracks'].isChecked():
                         for key,edges in route.segments.items():
                             points = board.traces[key].findall('./Points/Point'); tracks_count += len(intervals(edges))
@@ -700,6 +898,11 @@ class Viewer(QMainWindow):
             visible_parts = sum(len(g) for i,g in enumerate(groups) if selected_group < 0 or i == selected_group)
             count_text = str(total_parts) if visible_parts == total_parts else f'{visible_parts} / {total_parts}'
             self.summary.setText(f"{'Preview' if use_preview else 'Current PCB'} · {count_text} parts · {pairs} pairs below {gap_limit:g} mm · {fallback} outline/silk fallbacks"+ (f' · {no_geometry} missing geometry' if no_geometry else '')+(f' · {tracks_count} trace spans, {vias_count} vias' if tracks_count or vias_count else ''))
+            if use_preview and hasattr(board,'interlink_summary'):
+                copied,skipped = board.interlink_summary
+                if copied or skipped:
+                    retained = 'existing routing kept' if self.recipe['replication']['preserve_skipped_routing'] else 'unmatched routing removed'
+                    self.summary.setText(self.summary.text()+f' · {copied} interlinks updated, {skipped} copies skipped ({retained})')
             self.inspect()
             if not scene.items():
                 self.summary.setText('No parts in the selected display group.')
@@ -805,6 +1008,7 @@ class Viewer(QMainWindow):
         if self.recipe_path is None:
             return self.save_as()
         try:
+            self.capture_project_view()
             data = deepcopy(self.recipe)
             import os
             try:
@@ -816,7 +1020,7 @@ class Viewer(QMainWindow):
                     data['replicated_pcb'] = os.path.relpath(data['replicated_pcb'],self.recipe_path.parent)
                 except ValueError:
                     pass
-            write_json(self.recipe_path,data); self.saved = json.dumps(self.recipe,sort_keys=True); self.title(); self.remember(self.recipe_path); return True
+            write_json(self.recipe_path,data); self.saved = json.dumps(self.recipe,sort_keys=True); self.title(); self.remember(self.recipe_path); self.store_session(); return True
         except Exception as error:
             self.error(error); return False
 
@@ -844,15 +1048,37 @@ class Viewer(QMainWindow):
         self.recipe_path = old; return False
 
     def reload(self):
-        if not self.board or not self.may_discard():
+        if not self.board:
             return
-        if self.recipe_path:
-            self.open_path(self.recipe_path,ask=False)
-        else:
-            try:
-                self.board = Board(self.board.path); self.preview_board = None; self.preview_key = ''; self.populate(); self.refresh_display(); self.fit()
-            except Exception as error:
-                self.error(error)
+        try:
+            board = Board(self.board.path)
+            group_refs(board,self.recipe)
+            self.capture_project_view(); self.timer.stop()
+            if self.worker:
+                self.worker.requestInterruption()
+            self.board = board
+            self.pending_output = None; self.preview_board = None; self.preview_groups = None
+            self.preview_key = ''; self.preview_error = ''
+            self.restore_camera_after_preview = self.preview.isChecked()
+            if self.selected not in board.parts:
+                self.selected = ''
+            if self.recipe['view'].get('active_layer') not in board.layers:
+                self.recipe['view']['active_layer'] = next(iter(board.layers),None)
+            self.populate(); self.title(); self.refresh_display(); self.fit(); self.restore_project_view()
+            self.schedule_session()
+            self.statusBar().showMessage('PCB reloaded. Current groups, settings and view kept.',7000)
+        except Exception as error:
+            self.error(error)
+
+    def revert_recipe(self):
+        if not self.recipe_path:
+            return
+        self.store_session()
+        if self.dirty() and QMessageBox.question(self,'Revert recipe?',
+                'Discard current recipe changes and reload the saved recipe JSON?',
+                QMessageBox.Discard|QMessageBox.Cancel,QMessageBox.Cancel) != QMessageBox.Discard:
+            return
+        self.open_path(self.recipe_path,ask=False)
 
     def export_as(self):
         self.export(save_as=True)
@@ -863,7 +1089,7 @@ class Viewer(QMainWindow):
         filename = self.recipe.get('replicated_pcb')
         if save_as or not filename:
             proposed = filename or self.board.path.with_name(self.board.path.stem+'_replicated.dipxml')
-            filename,_ = QFileDialog.getSaveFileName(self,'Save replicated PCB as',str(proposed),'DipTrace PCB XML (*.dipxml)')
+            filename,_ = QFileDialog.getSaveFileName(self,'Export replicated PCB as',str(proposed),'DipTrace PCB XML (*.dipxml)')
             if not filename:
                 return
         output = Path(filename).resolve()
@@ -878,39 +1104,49 @@ class Viewer(QMainWindow):
 
     def save_replicated_to(self,output):
         try:
-            if self.board.path.read_bytes() != self.board.data:
-                raise ValueError('The source PCB changed on disk. Reload before replicating.')
+            overwrites_input = output == self.board.path
+            if overwrites_input and self.board.path.read_bytes() != self.board.data:
+                raise ValueError(f'The input PCB changed on disk:\n{self.board.path}\nReload PCB before overwriting it. Export as a different filename to export the loaded preview.')
             data = ET.tostring(self.preview_board.root,encoding='utf-8',xml_declaration=True)
-            if output == self.board.path:
+            if overwrites_input:
                 backup = output.with_name(output.name+'.'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.bak'); backup.write_bytes(self.board.data)
             temp = output.with_name(output.name+'.tmp'); temp.write_bytes(data); temp.replace(output)
             self.recipe['replicated_pcb'] = str(output)
-            if output == self.board.path:
+            create = self.recipe['replication']['mode'] == 'Create copies'
+            arrange = overwrites_input and create and QMessageBox.question(self,'Arrange generated groups?',
+                'PCB exported. Create groups and switch to Arrange?\n\n'
+                'Yes opens the saved PCB with one group per instance, ready to update existing copies.\n'
+                'No keeps Create mode.',QMessageBox.Yes|QMessageBox.No,QMessageBox.Yes) == QMessageBox.Yes
+            if overwrites_input:
                 old_groups = self.preview_groups; old_source = old_groups[0]['refs']; offsets = dict(self.recipe['rotation_offsets'])
-                if self.recipe['replication']['mode'] == 'Create copies':
+                if arrange:
                     for group in old_groups[1:]:
                         for a,b in zip(old_source,group['refs']):
                             if a in offsets:
                                 offsets[b] = offsets[a]
-                self.board = Board(output); self.recipe['pcb'] = str(output); self.recipe['groups'] = old_groups; self.recipe['rotation_offsets'] = offsets
-                source_index = 0 if self.recipe['replication']['mode'] == 'Create copies' else self.recipe['replication']['source']
-                self.recipe['view']['preview'] = False; self.recipe['replication'].update(mode='Arrange existing groups',source=source_index)
+                self.board = Board(output); self.recipe['pcb'] = str(output)
+                if arrange or not create:
+                    self.recipe['groups'] = old_groups; self.recipe['rotation_offsets'] = offsets
+                    source_index = 0 if arrange else self.recipe['replication']['source']
+                    self.recipe['replication'].update(mode='Arrange existing groups',source=source_index)
+                self.recipe['view']['preview'] = False
                 self.preview_board = None; self.preview_key = ''; self.populate(); self.refresh_display(); self.fit()
-            if self.save():
-                self.statusBar().showMessage('Replicated PCB saved. Re-import the XML in DipTrace and run its checks.',10000)
+            if self.store_session():
+                self.statusBar().showMessage('Replicated PCB exported. Re-import the XML in DipTrace and run its checks.',10000)
         except Exception as error:
             self.error(error)
 
     def save_preferences(self):
         self.preferences['geometry'] = bytes(self.saveGeometry().toHex()).decode()
-        self.preferences['splitter'] = bytes(self.splitter.saveState().toHex()).decode()
+        self.preferences.pop('splitter',None); self.preferences.pop('replication_open',None)
         write_json(SETTINGS_PATH,self.preferences)
 
     def closeEvent(self,event):
+        if not self.store_session(persist_project_view=True):
+            self.error(f'Could not save the working session: {self.session_error}')
+            event.ignore(); return
         if self.worker:
             self.closing = True; self.worker.requestInterruption(); event.ignore(); return
-        if not self.may_discard():
-            self.closing = False; event.ignore(); return
         try:
             self.save_preferences()
         except Exception as error:

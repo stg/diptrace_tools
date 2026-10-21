@@ -26,6 +26,8 @@ from bom_conversions import load_normalization_rules
 from Shared.normalization import note_highlight
 from Shared.search import compile_query, matches_terms
 from Shared.platform_helpers import open_file, configure_app_icon
+from Shared.markdown_help import show_help
+from Shared.scrolling import protect_values_from_wheel
 
 RED = QBrush(QColor("#ffe0e0"))
 INK = QBrush(QColor("#9b2424"))
@@ -314,7 +316,7 @@ class Editor(QMainWindow):
 
     def open_help(self):
         try:
-            open_file(str(Path(__file__).with_name("HELP.txt")))
+            show_help(self, Path(__file__).with_name("README.md"), "JLCPCB BOM — How to use")
         except Exception as exc:
             self.error(exc)
 
@@ -1368,6 +1370,7 @@ def main():
     parser.add_argument("schematic", nargs="?", type=Path, help="Optional .dchxml to open")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
+    protect_values_from_wheel(app)
     configure_app_icon(app, "jlcpcb_bom")
     app.setStyle(EditorStyle("Fusion"))
     window = Editor(args.schematic)

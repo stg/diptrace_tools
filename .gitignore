@@ -35,7 +35,6 @@ __pycache__/
 /JLCPCB_BOM/*.xls
 /JLCPCB_BOM/*.xlsx
 /JLCPCB_BOM/*.txt
-!/JLCPCB_BOM/HELP.txt
 !/JLCPCB_BOM/BOM_EDITOR_README.txt
 !/JLCPCB_BOM/requirements.txt
 !/JLCPCB_BOM/requirements-editor.txt

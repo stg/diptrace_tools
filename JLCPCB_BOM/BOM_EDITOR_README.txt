@@ -1,7 +1,7 @@
 JLCPCB BOM Editor
 ==================
 
-Help -> How to use opens HELP.txt, a brief guide for new users. This README
+Help -> How to use opens README.md, a brief guide for new users. This README
 keeps the detailed behavior reference. Help -> Normalization rule reference
 documents the configurable language; Tools -> Open normalization rules opens
 this program's rules JSON. Defaults preserve the existing assembly results.

@@ -18,7 +18,7 @@ Three desktop tools for reusing DipTrace designs, preparing assembly orders and 
 - **See differences before ordering.** Compare the schematic, edited project data and generated BOM side by side, with mismatches highlighted.
 - **Check your selected parts with AI.** Prepare supplier data and configurable AI instructions directly from the current project, including unsaved edits, alternatives, footprints and notes, alongside RoHS information.
 
-Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor.cmd)**. Export a DipTrace XML schematic and a placement CSV in mm, inches or mils. **Help → How to use** explains the ordering and back-annotation workflow.
+Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor.cmd)**. Export a DipTrace XML schematic and a placement CSV in mm, inches or mils. **[How to use](JLCPCB_BOM/README.md)**, also in the Help menu, explains the ordering and back-annotation workflow.
 
 <img src="jlcpcb_bom_screen.png" alt="JLCPCB_BOM" width="720">
 
@@ -28,7 +28,7 @@ Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor
 - **Edit one group and generate or update the rest.** Replicate complex placement patterns together with internal routing and vias, preserving destination nets when updating existing groups.
 - **Explore arrangements without losing the current design.** Preview linear, grid or rotational placement and keep multiple reusable JSON recipes for one PCB.
 
-Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a DipTrace PCB XML, choose a recipe JSON filename and add groups of RefDes. Replication controls stay folded away for ordinary viewing. **Help → How to use** explains body sizes, internal routing and export.
+Start **[Launch PCB Layout.cmd](PCB_Layout/Launch%20PCB%20Layout.cmd)**. Open a DipTrace PCB XML, choose a recipe JSON filename and add groups of RefDes. Replication controls stay folded away for ordinary viewing. **[How to use](PCB_Layout/README.md)**, also in the Help menu, explains body sizes, routing and export.
 
 <img src="pcb_layout_screen.png" alt="PCB_Layout" width="720" height="455">
 
@@ -40,7 +40,7 @@ The central [component_sizes.json](PCB_Layout/component_sizes.json) starts with 
 - **Find the physical parts too.** Keep drawer numbers or other storage labels beside each part, independently of schematic refreshes.
 - **Search large archives quickly.** Normalize names, values and packages, search with wildcards, and reuse unchanged files instead of parsing the entire archive again.
 
-Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Select a base folder and filter fields under **Tools → Settings**, then refresh. **Help → How to use** opens the user guide.
+Start **[Launch Part Database.cmd](Part_DB/Launch%20Part%20Database.cmd)**. Select a base folder and filter fields under **Tools → Settings**, then refresh. **[How to use](Part_DB/README.md)** is also available in the Help menu.
 
 <img src="part_db_screen.png" alt="Part_DB" width="720">
 
@@ -111,7 +111,7 @@ Project JSON, schematic/PCB files and BOM/CPL exports are ignored by Git through
 
 PCB_Layout keeps recent/window preferences in `PCB_Layout/settings.json`, body dimensions in its central `component_sizes.json`, and study settings in user-named recipe JSON files. Opening a PCB prompts for a recipe filename; opening that recipe restores its PCB, groups and arrangement. Exported PCB XML must be re-imported into DipTrace. Outlines, pours and board graphics are retained rather than repeated with a group.
 
-[PCB_Layout project defaults](PCB_Layout/project_defaults.json), available under Tools, are copied into new recipes. Changing those templates does not change an existing study.
+[PCB_Layout recipe defaults](PCB_Layout/project_defaults.json), available under Tools, are copied into new recipes. Changing those templates does not change an existing recipe.
 
 DipTrace-ReverseEngineer is excluded from this repository. Part_DB includes the extracted structural parser it needs, so that source project is unnecessary at runtime. The detailed per-tool READMEs remain available for implementation and behavior reference.
 

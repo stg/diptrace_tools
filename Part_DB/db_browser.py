@@ -23,6 +23,8 @@ from db_core import (
 )
 
 from Shared.platform_helpers import open_file, configure_app_icon
+from Shared.markdown_help import show_help
+from Shared.scrolling import protect_values_from_wheel
 
 DEFAULT_SETTINGS = {
     "schema_version": 1,
@@ -270,7 +272,7 @@ class Browser(QMainWindow):
         action(tools_menu, "Open part locations", self.open_locations_file)
         action(tools_menu, "Open normalization rules", lambda: self.open_file(RULES_PATH))
         help_menu = self.menuBar().addMenu("&Help")
-        action(help_menu, "How to use", lambda: self.open_file(APP_DIR / "HELP.txt"))
+        action(help_menu, "How to use", lambda: show_help(self, APP_DIR / "README.md", "Part Database — How to use"))
         action(help_menu, "Normalization rule reference", lambda: self.open_file(APP_DIR.parent / "Shared" / "NORMALIZATION.txt"))
 
     def restore_layout(self):
@@ -649,6 +651,7 @@ class Browser(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    protect_values_from_wheel(app)
     configure_app_icon(app, "part_db")
     app.setStyle("Fusion")
     if sys.platform == "win32":

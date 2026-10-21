@@ -7,14 +7,14 @@ import time
 import unittest
 from unittest.mock import patch
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import QImage, QPainter, QPolygonF, QTransform, QColor, QPen, QBrush
 from PySide6.QtTest import QTest
 from lxml import etree as ET
 import layout_viewer as ui
 from layout_core import Board, default_recipe, write_json, Routing, rotate
-from test_layout_core import fixture
+from test_layout_core import fixture, linked_grid
 
 
 class ViewerTests(unittest.TestCase):
@@ -25,6 +25,8 @@ class ViewerTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name)
         self.settings = patch.object(ui,'SETTINGS_PATH',self.root/'settings.json'); self.settings.start()
+        self.arrange_question = patch.object(ui.QMessageBox,'question',return_value=QMessageBox.No)
+        self.question = self.arrange_question.start()
         self.window = ui.Viewer()
         self.errors = []; self.window.error = lambda error:self.errors.append(str(error))
         self.source = self.root/'board.dipxml'; self.source.write_bytes(ET.tostring(fixture().root))
@@ -34,7 +36,7 @@ class ViewerTests(unittest.TestCase):
             self.window.worker.requestInterruption(); self.window.worker.wait(5000)
             self.app.processEvents()
         self.window.timer.stop(); self.window.saved = json.dumps(self.window.recipe,sort_keys=True) if self.window.recipe else ''
-        self.window.close(); self.settings.stop(); self.temp.cleanup()
+        self.window.close(); self.arrange_question.stop(); self.settings.stop(); self.temp.cleanup()
 
     def wait_for_replication(self):
         deadline = time.monotonic()+8
@@ -72,35 +74,40 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(len(Board(output).parts),expected)
         saved = json.loads(recipe_path.read_text()); self.assertEqual(len(saved['groups']),1)
         self.assertEqual(saved['replication']['mode'],'Create copies')
-        self.assertEqual(saved['replicated_pcb'],'replicated.dipxml')
-        self.window.open_path(recipe_path,ask=False); self.assertEqual(self.window.board.path,self.source)
+        self.assertNotIn('replicated_pcb',saved)
         self.assertEqual(self.window.recipe['replicated_pcb'],str(output))
+        self.assertEqual(json.loads((self.root/'session.json').read_text())['recipe']['replicated_pcb'],str(output))
+        self.window.open_path(recipe_path,ask=False); self.assertEqual(self.window.board.path,self.source)
+        self.assertNotIn('replicated_pcb',self.window.recipe)
 
-    def test_replicated_save_builds_latest_and_remembers_filename(self):
+    def test_export_builds_latest_and_remembers_filename(self):
         recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
         path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
         self.window.show(); self.window.activateWindow(); self.window.canvas.setFocus(); self.app.processEvents()
         output = self.root/'replicated.dipxml'
         with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')) as choose:
-            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier)
+            QTest.keyClick(self.window.canvas,Qt.Key_E,Qt.ControlModifier)
             self.wait_for_replication(); choose.assert_called_once()
         self.assertTrue(output.exists()); self.assertEqual(self.window.board.path,self.source)
-        self.assertEqual(json.loads(path.read_text())['replicated_pcb'],'replicated.dipxml')
+        self.assertEqual(self.window.recipe['replicated_pcb'],str(output))
+        self.assertNotIn('replicated_pcb',json.loads(path.read_text()))
         self.window.inputs['dx'].setValue(9)
         with patch.object(ui.QFileDialog,'getSaveFileName',side_effect=AssertionError('Save asked again')):
-            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier)
+            QTest.keyClick(self.window.canvas,Qt.Key_E,Qt.ControlModifier)
             self.wait_for_replication()
         saved_board = Board(output)
         copied = self.window.preview_groups[1]['refs']
         self.assertEqual([saved_board.parts[r].x for r in copied],[9,11])
         other = self.root/'other.dipxml'
         with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(other),'')) as choose:
-            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier|Qt.ShiftModifier)
+            QTest.keyClick(self.window.canvas,Qt.Key_E,Qt.ControlModifier|Qt.ShiftModifier)
             self.wait_for_replication(); choose.assert_called_once()
-        self.assertTrue(other.exists()); self.assertEqual(json.loads(path.read_text())['replicated_pcb'],'other.dipxml')
+        self.assertTrue(other.exists()); self.assertEqual(self.window.recipe['replicated_pcb'],str(other))
+        self.assertNotIn('replicated_pcb',json.loads(path.read_text()))
         self.assertFalse(self.errors,self.errors)
 
     def test_in_place_save_refreshes_and_repeated_save_does_not_add_parts(self):
+        self.question.return_value = QMessageBox.Yes
         recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
         recipe['replicated_pcb'] = str(self.source)
         path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
@@ -118,6 +125,162 @@ class ViewerTests(unittest.TestCase):
             self.window.export(); self.wait_for_replication()
         self.assertEqual(len(Board(self.source).parts),count)
         self.assertFalse(self.errors,self.errors)
+
+    def test_grid_create_overwrite_can_open_generated_groups_in_arrange_mode(self):
+        self.question.return_value = QMessageBox.Yes
+        recipe = default_recipe(Board(self.source))
+        recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        recipe['replication'].update(layout='Grid',columns=2,rows=2,column_dx=3,row_dy=4)
+        recipe['rotation_offsets'] = {'R1':15}
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        original = self.source.read_bytes(); output = self.source
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')):
+            self.window.export(); self.wait_for_replication()
+        self.assertTrue(output.exists()); self.assertFalse(self.errors,self.errors)
+        self.question.assert_called_once()
+        self.assertTrue(output.exists())  # Question is only reached after the file is written.
+        self.assertEqual(self.window.board.path,output)
+        self.assertNotEqual(self.source.read_bytes(),original)
+        self.assertEqual(next(self.root.glob('board.dipxml.*.bak')).read_bytes(),original)
+        saved = json.loads(path.read_text())
+        self.assertEqual(len(saved['groups']),1)
+        self.assertEqual(saved['replication']['mode'],'Create copies')
+        self.assertEqual(len(self.window.recipe['groups']),4)
+        self.assertEqual(self.window.recipe['replication']['mode'],'Arrange existing groups')
+        self.assertEqual(self.window.recipe['replication']['source'],0)
+        for group in self.window.recipe['groups']:
+            self.assertEqual(self.window.recipe['rotation_offsets'][group['refs'][0]],15)
+        count = len(Board(output).parts)
+        self.window.export(); self.wait_for_replication()
+        self.assertEqual(len(Board(output).parts),count)
+        self.question.assert_called_once()
+        self.assertFalse(self.errors,self.errors)
+
+    def test_create_export_as_is_output_only_even_if_switch_question_would_be_yes(self):
+        self.question.return_value = QMessageBox.Yes
+        recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.window.rep_toggle.setChecked(True); self.window.preview.setChecked(True)
+        self.window.refresh_display(); self.wait_for_replication()
+        original_board = self.window.board; original_preview = self.window.preview_board
+        groups = json.dumps(self.window.recipe['groups']); output = self.root/'result.dipxml'
+        original_recipe = path.read_bytes()
+        with patch.object(self.window,'populate',side_effect=AssertionError('Save as repopulated')), patch.object(self.window,'refresh_display',side_effect=AssertionError('Save as recalculated')):
+            self.window.save_replicated_to(output)
+        self.question.assert_not_called(); self.assertIs(self.window.board,original_board)
+        self.assertIs(self.window.preview_board,original_preview); self.assertTrue(output.exists())
+        self.assertEqual(json.dumps(self.window.recipe['groups']),groups)
+        self.assertEqual(self.window.recipe['replication']['mode'],'Create copies')
+        self.assertEqual(path.read_bytes(),original_recipe)
+        self.assertFalse(self.errors,self.errors)
+
+    def test_recipe_shortcuts_only_write_json(self):
+        recipe = default_recipe(Board(self.source)); path = self.root/'study.json'
+        output = self.root/'result.dipxml'; output.write_bytes(b'Unchanged output')
+        recipe['replicated_pcb'] = str(output); write_json(path,recipe)
+        self.window.open_path(path,ask=False)
+        self.window.show(); self.window.activateWindow(); self.window.canvas.setFocus(); self.app.processEvents()
+        original = self.source.read_bytes(); self.window.inputs['dx'].setValue(9)
+        with patch.object(self.window,'export',side_effect=AssertionError('Save exported PCB')):
+            QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier)
+            self.assertEqual(json.loads(path.read_text())['replication']['dx'],9)
+            other = self.root/'other.json'
+            with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(other),'')):
+                QTest.keyClick(self.window.canvas,Qt.Key_S,Qt.ControlModifier|Qt.ShiftModifier)
+            self.assertTrue(other.exists()); self.assertEqual(self.window.recipe_path,other)
+        self.assertEqual(self.source.read_bytes(),original)
+        self.assertEqual(output.read_bytes(),b'Unchanged output')
+        self.assertFalse(self.errors,self.errors)
+
+    def test_unnamed_export_does_not_ask_to_save_recipe(self):
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=('','')):
+            self.window.open_path(self.source,ask=False)
+        output = self.root/'result.dipxml'; original = self.source.read_bytes()
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')) as choose, \
+                patch.object(self.window,'save',side_effect=AssertionError('Export saved recipe')):
+            self.window.export(); self.wait_for_replication()
+            choose.assert_called_once()
+        self.assertTrue(output.exists()); self.assertIsNone(self.window.recipe_path)
+        self.assertEqual(self.source.read_bytes(),original)
+        self.assertFalse(self.errors,self.errors)
+
+    def test_reload_pcb_preserves_unsaved_recipe_and_updates_preview(self):
+        recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.window.rep_toggle.setChecked(True); self.window.preview.setChecked(True)
+        self.window.inputs['dx'].setValue(9); self.window.mirror.setChecked(True)
+        self.window.refresh_display(); self.wait_for_replication()
+        self.window.capture_project_view(); view = json.loads(json.dumps(self.window.recipe['view']))
+        original_recipe = path.read_bytes()
+        changed = Board(self.source); changed.parts['R1'].element.set('X','42')
+        self.source.write_bytes(ET.tostring(changed.root))
+        # An external recipe edit must not replace the working settings on PCB reload.
+        external = json.loads(path.read_text()); external['replication']['dx'] = 77; write_json(path,external)
+        self.window.reload(); self.wait_for_replication()
+        self.question.assert_not_called()
+        self.assertEqual(self.window.board.parts['R1'].x,42)
+        self.assertEqual(self.window.preview_board.parts['R1'].x,42)
+        self.assertEqual(self.window.inputs['dx'].value(),9)
+        self.assertEqual(self.window.recipe['groups'],recipe['groups'])
+        self.assertTrue(self.window.preview.isChecked()); self.assertTrue(self.window.mirror.isChecked())
+        self.assertAlmostEqual(abs(self.window.canvas.transform().m11()),view['camera']['scale'])
+        self.assertEqual(json.loads(path.read_text())['replication']['dx'],77)
+        self.assertTrue(self.window.dirty()); self.assertFalse(self.errors,self.errors)
+
+    def test_revert_recipe_cancel_then_discard_reads_saved_json(self):
+        recipe = default_recipe(Board(self.source)); path = self.root/'study.json'; write_json(path,recipe)
+        self.window.open_path(path,ask=False); self.window.inputs['dx'].setValue(9)
+        self.window.mirror.setChecked(True)
+        external = json.loads(path.read_text()); external['replication']['dx'] = 7; write_json(path,external)
+        saved_bytes = path.read_bytes()
+        self.question.return_value = QMessageBox.Cancel; self.window.revert_button.click()
+        self.assertEqual(self.window.inputs['dx'].value(),9); self.assertTrue(self.window.mirror.isChecked())
+        self.assertEqual(path.read_bytes(),saved_bytes)
+        self.question.return_value = QMessageBox.Discard; self.window.revert_button.click()
+        self.assertEqual(self.window.inputs['dx'].value(),7); self.assertFalse(self.window.mirror.isChecked())
+        self.assertEqual(path.read_bytes(),saved_bytes)
+        self.assertFalse(self.window.dirty()); self.assertFalse(self.errors,self.errors)
+
+    def test_relink_keeps_recipe_and_settings_and_rejects_missing_parts(self):
+        board,recipe = linked_grid(); self.source.write_bytes(ET.tostring(board.root)); recipe['pcb'] = str(self.source)
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        settings = json.loads(json.dumps(self.window.recipe['replication'])); groups = json.dumps(self.window.recipe['groups'])
+        new_source = self.root/'revised.dipxml'; new_source.write_bytes(self.source.read_bytes())
+        self.window.rep_toggle.setChecked(True); self.window.preview.setChecked(True)
+        self.window.refresh_display(); self.wait_for_replication()
+        with patch.object(ui.QFileDialog,'getOpenFileName',return_value=(str(new_source),'')):
+            self.window.relink_button.click()
+        self.assertEqual(self.window.board.path,new_source); self.assertEqual(self.window.recipe_path,path)
+        self.assertEqual(self.window.recipe['replication'],settings)
+        self.assertEqual(json.dumps(self.window.recipe['groups']),groups)
+        self.assertFalse(self.window.preview.isChecked()); self.assertIsNone(self.window.preview_board)
+        self.assertEqual(self.window.input_label.text(),'revised.dipxml'); self.assertTrue(self.window.dirty())
+        self.window.save(); self.assertEqual(json.loads(path.read_text())['pcb'],'revised.dipxml')
+        self.assertFalse(self.errors,self.errors)
+        missing = Board(new_source); missing.parts['U1'].element.find('RefDes').text = 'U99'
+        wrong = self.root/'wrong.dipxml'; wrong.write_bytes(ET.tostring(missing.root))
+        self.window.relink_to(wrong)
+        self.assertEqual(self.window.board.path,new_source); self.assertIn('Unknown part RefDes',self.errors[-1])
+
+    def test_save_as_exports_loaded_preview_when_input_changed_but_will_not_overwrite_input(self):
+        recipe = default_recipe(Board(self.source))
+        recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        changed = Board(self.source); changed.parts['R1'].element.set('X','42')
+        changed_bytes = ET.tostring(changed.root); self.source.write_bytes(changed_bytes)
+        output = self.root/'new.dipxml'
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(output),'')):
+            self.window.export(); self.wait_for_replication()
+        self.assertTrue(output.exists()); self.assertFalse(self.errors,self.errors)
+        self.assertEqual(Board(output).parts['R1'].x,0)
+        self.assertEqual(self.source.read_bytes(),changed_bytes)
+        self.assertEqual(self.window.board.path,self.source)
+        self.assertEqual(self.window.recipe['replication']['mode'],'Create copies')
+        self.assertEqual(len(self.window.recipe['groups']),1)
+        self.window.save_replicated_to(self.source)
+        self.assertEqual(self.source.read_bytes(),changed_bytes)
+        self.assertIn('input PCB changed on disk',self.errors[-1])
+        self.assertEqual(len(list(self.root.glob('board.dipxml.*.bak'))),0)
 
     def test_replicated_output_path_survives_recipe_save_as(self):
         recipe = default_recipe(Board(self.source)); recipe['replicated_pcb'] = 'replicated.dipxml'
@@ -193,6 +356,96 @@ class ViewerTests(unittest.TestCase):
         path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
         self.window.rep_toggle.setChecked(True); self.window.timer.stop(); self.window.redraw()
         self.assertEqual(set(self.window.body_items),{'R1','R2','R3','R4'})
+
+    def test_grid_rotation_and_preservation_controls_persist(self):
+        board,recipe = linked_grid(); self.source.write_bytes(ET.tostring(board.root)); recipe['pcb'] = str(self.source)
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.window.rep_toggle.setChecked(True)
+        self.assertTrue(self.window.rotate_odd.isChecked()); self.assertTrue(self.window.rotate_axes['Rows'].isChecked())
+        self.assertTrue(self.window.preserve_skipped.isEnabled()); self.assertTrue(self.window.preserve_skipped.isChecked())
+        self.window.rotate_axes['Columns'].setChecked(True); self.window.preserve_skipped.setChecked(False)
+        self.window.grid_order.setCurrentText('Column first')
+        self.window.save(); self.window.open_path(path,ask=False)
+        self.assertEqual(self.window.recipe['replication']['rotate_odd_axis'],'Columns')
+        self.assertEqual(self.window.grid_order.currentText(),'Column first')
+        self.assertFalse(self.window.preserve_skipped.isChecked())
+        self.window.rep_fields['mode'].setCurrentText('Create copies')
+        self.assertFalse(self.window.preserve_skipped.isEnabled())
+        self.window.rotate_odd.setChecked(False)
+        self.assertTrue(all(not button.isEnabled() for button in self.window.rotate_axes.values()))
+        self.assertFalse(self.errors,self.errors)
+
+    def test_close_restores_unsaved_named_project_without_saving_replication_edits(self):
+        recipe = default_recipe(Board(self.source)); recipe['groups'] = [{'name':'Source','refs':['R1','R2']}]
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        original_step = recipe['replication']['dx']
+        self.window.rep_toggle.setChecked(True); self.window.inputs['dx'].setValue(9)
+        self.window.mirror.setChecked(True); self.window.canvas.scale(1.5,1.5)
+        self.window.close(); self.question.assert_not_called()
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved['replication']['dx'],original_step)
+        self.assertTrue(saved['view']['mirror']); self.assertTrue(saved['view']['replication_open'])
+        scale = saved['view']['camera']['scale']
+        self.window = ui.Viewer(); self.window.error = lambda e:self.errors.append(str(e))
+        self.app.processEvents()
+        self.assertEqual(self.window.recipe_path,path)
+        self.assertEqual(self.window.inputs['dx'].value(),9)
+        self.assertTrue(self.window.mirror.isChecked()); self.assertTrue(self.window.rep_toggle.isChecked())
+        self.assertAlmostEqual(abs(self.window.canvas.transform().m11()),scale)
+        self.assertTrue(self.window.dirty()); self.assertFalse(self.errors,self.errors)
+
+    def test_unnamed_session_restores_but_switching_projects_still_asks(self):
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=('','')):
+            self.window.open_path(self.source,ask=False)
+        self.assertIsNone(self.window.recipe_path)
+        self.window.inputs['dx'].setValue(8)
+        self.window.close(); self.question.assert_not_called()
+        self.window = ui.Viewer(); self.window.error = lambda e:self.errors.append(str(e))
+        self.app.processEvents()
+        self.assertIsNone(self.window.recipe_path); self.assertEqual(self.window.inputs['dx'].value(),8)
+        other = self.root/'another.json'; write_json(other,default_recipe(Board(self.source)))
+        self.question.return_value = QMessageBox.Cancel
+        self.window.open_path(other)
+        self.question.assert_called_once(); self.assertIsNone(self.window.recipe_path)
+        self.assertEqual(self.window.inputs['dx'].value(),8)
+        self.assertFalse(self.errors,self.errors)
+
+    def test_startup_file_does_not_discard_a_previous_unsaved_session(self):
+        with patch.object(ui.QFileDialog,'getSaveFileName',return_value=('','')):
+            self.window.open_path(self.source,ask=False)
+        self.window.inputs['dx'].setValue(11); self.window.close()
+        other = self.root/'another.json'; write_json(other,default_recipe(Board(self.source)))
+        self.question.return_value = QMessageBox.Cancel
+        self.window = ui.Viewer(other); self.window.error = lambda e:self.errors.append(str(e))
+        self.app.processEvents()
+        self.question.assert_called_once()
+        self.assertIsNone(self.window.recipe_path); self.assertEqual(self.window.inputs['dx'].value(),11)
+        self.assertFalse(self.errors,self.errors)
+
+    def test_all_displays_intergroup_tracks_once_and_source_stays_local(self):
+        board,recipe = linked_grid(); self.source.write_bytes(ET.tostring(board.root)); recipe['pcb'] = str(self.source)
+        recipe['view'].update(tracks=True,vias=True,routing_scope='All')
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.assertEqual(sum(item.data(1) == 'track' for item in self.window.canvas.scene().items()),7)
+        self.window.scope_buttons['Source'].setChecked(True); self.window.redraw()
+        self.assertFalse(any(item.data(1) == 'track' for item in self.window.canvas.scene().items()))
+        self.window.scope_buttons['All'].setChecked(True); self.window.show_group.setCurrentIndex(1); self.window.redraw()
+        self.assertFalse(any(item.data(1) == 'track' for item in self.window.canvas.scene().items()))
+        self.assertFalse(self.errors,self.errors)
+
+    def test_preview_shows_preserved_edge_and_hides_it_when_disabled(self):
+        board,recipe = linked_grid(); self.source.write_bytes(ET.tostring(board.root)); recipe['pcb'] = str(self.source)
+        recipe['view'].update(tracks=True,vias=True)
+        path = self.root/'study.json'; write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.window.rep_toggle.setChecked(True); self.window.preview.setChecked(True)
+        self.window.refresh_display(); self.wait_for_replication()
+        self.assertEqual(sum(item.data(1) == 'track' for item in self.window.canvas.scene().items()),13)
+        self.assertTrue(self.window.preview_board.nets['2'].findall('./Traces/Trace'))
+        self.window.preserve_skipped.setChecked(False)
+        self.window.refresh_display(); self.wait_for_replication()
+        self.assertEqual(sum(item.data(1) == 'track' for item in self.window.canvas.scene().items()),12)
+        self.assertFalse(self.window.preview_board.nets['2'].findall('./Traces/Trace'))
+        self.assertFalse(self.errors,self.errors)
 
     def test_rotated_body_hit_testing_in_mirrored_views(self):
         canvas = self.window.canvas; canvas.show()
