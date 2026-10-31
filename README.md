@@ -16,6 +16,7 @@ Three desktop tools for reusing DipTrace designs, preparing assembly orders and 
 - **Keep primary parts and alternatives under control.** Save part choices and substitutes, then select which ones go into the next assembly order.
 - **Generate consistent BOM and placement files together.** Part choices, normalization, exclusion rules and footprint corrections feed the assembly outputs; excluded parts disappear from both BOM and CPL.
 - **See differences before ordering.** Compare the schematic, edited project data and generated BOM side by side, with mismatches highlighted.
+- **Check stock and prices before ordering.** Compare JLCPCB, idle resale and LCSC availability, and calculate supplier prices for the desired board quantity.
 - **Check your selected parts with AI.** Prepare supplier data and configurable AI instructions directly from the current project, including unsaved edits, alternatives, footprints and notes, alongside RoHS information.
 
 Start **[Launch JLCPCB BOM Editor.cmd](JLCPCB_BOM/Launch%20JLCPCB%20BOM%20Editor.cmd)**. Export a DipTrace XML schematic and a placement CSV in mm, inches or mils. **[How to use](JLCPCB_BOM/README.md)**, also in the Help menu, explains the ordering and back-annotation workflow.

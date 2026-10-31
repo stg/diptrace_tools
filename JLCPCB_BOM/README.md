@@ -15,6 +15,8 @@ Create, maintain and check JLCPCB assembly files from a DipTrace design. Keep sc
 
 For `Board.dchxml`, the default placement filename is `Board_CPL.csv`, beside the schematic.
 
+Multipart symbols are counted once using their main unit, including exports with separate styles for different units. Letter-only PCB designators such as `BOOT` remain in the project JSON; DNM/DNP exclusion rules can omit them from assembly output.
+
 Export these placement columns from DipTrace; their order may vary:
 
 ```text
@@ -68,6 +70,16 @@ To bring selections back, choose **Tools → JLCPCB part numbers from XLS(X)**. 
 - **BOM Matching / Assembly Order** listings, with `.xls` or `.xlsx` filenames.
 
 Numbers are matched by designator. For a conflict with a saved primary number, choose **replace**, **add an alternative**, or **skip**. Review the resulting choices and generate again.
+
+## Stock check
+
+**Stock check** is available from the main window and the Tools menu. It shows the current output components, footprints and part numbers alongside JLCPCB stock, available JLCPCB idle parts and LCSC stock. Excluded parts are omitted and selected alternates are used. Idle stock is the sum of the available resale listings.
+
+Enter the number of boards in **Order quantity**. Each line shows its count per board and required quantity, plus the applicable JLCPCB and LCSC unit and line prices in USD. The entire price-break data is kept in memory and prices recalculate as the quantity changes. For LCSC, when the required quantity is below the minimum quoted quantity, the first price is shown and the line price uses that minimum, labeled **min** and highlighted in yellow. These are component prices and do not include assembly fees, attrition, shipping or tax.
+
+JLCPCB and LCSC stock is red when it is below the quantity required and yellow when it is below twice the quantity required. When multiple output lines use the same part number, the comparison uses their combined requirement. Idle stock is a fallback and is green when it covers the requirement.
+
+The dialog checks unknown values automatically and keeps results in memory while the editor is open, including across projects. Values update as they arrive. **Refresh** checks every displayed part again, replacing each value as its new result arrives; **Abort** or closing the dialog stops the check and keeps the values already shown. Unknown values are blank, missing values show **No data** in yellow, and failures show **Fetch failed** in red. Failed lookups are retried when the dialog is reopened. Supplier website interfaces may change, and stock can change at any time.
 
 ## Check with AI
 

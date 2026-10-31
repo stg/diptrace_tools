@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from bom_editor_core import Project, FIELDS, grouped_rows, record_group_key, selected_component, REFS, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
 from bom_alternates_dialog import AlternatesDialog
+from stock_dialog import StockDialog
 from bom_conversions import CPL_ADJUSTMENTS_PATH, MissingCPLFile
 from bom_conversions import load_normalization_rules
 from Shared.normalization import note_highlight
@@ -108,6 +109,7 @@ class Editor(QMainWindow):
         self.buffer = ""
         self.check_cancelled = False
         self.check_input_file = None
+        self.stock_cache = {}
         self.settings = QSettings("DevSound", "JLCPCBBOMEditor")
         if not self.settings.allKeys():
             legacy_settings = QSettings("DevSound", "DipTraceBOMEditor")
@@ -138,6 +140,7 @@ class Editor(QMainWindow):
             ("Expand selected group", self.expand_selected),
             ("Compact identical", self.compact_identical),
             ("Generate outputs", self.generate),
+            ("Stock check…", self.check_stock),
         ]:
             button = QPushButton(name)
             button.clicked.connect(handler)
@@ -275,6 +278,7 @@ class Editor(QMainWindow):
         action(tools_menu, "Generate outputs", self.generate)
         tools_menu.addSeparator()
         action(tools_menu, "JLCPCB part numbers from XLS(X)…", self.import_lcsc)
+        action(tools_menu, "Stock check…", self.check_stock)
         action(tools_menu, "Check with AI", self.check_with_ai)
         tools_menu.addSeparator()
         action(tools_menu, "Open project settings JSON", self.open_project_settings)
@@ -1165,6 +1169,11 @@ class Editor(QMainWindow):
                 self.log.appendPlainText("Unknown designators skipped: " + ", ".join(unknown))
         except Exception as exc:
             self.error(exc)
+
+    def check_stock(self):
+        self.commit_editor()
+        if self.project and not self.process:
+            StockDialog(self.project.records, self.stock_cache, self).exec()
 
     def check_with_ai(self):
         self.commit_editor()

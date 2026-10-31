@@ -92,16 +92,21 @@ def read_schematic(path):
         record = {"Name": instance.findtext("Name", definition.findtext("Name", "")),
                   "Value": instance.findtext("Value", definition.findtext("Value", "")),
                   "Pattern": patterns.get(style, ""), "LCSC Part #": ""}
+        # XML converters may give each unit its own style/ComponentPart=0;
+        # PartNumber and the shared UpdateId retain the physical identity.
+        physical_index = int(instance.get("PartNumber", str(index)))
         identity = (instance.get("ComponentStyle"), instance.get("UpdateId"),
-                    instance.get("AllowParts") == "Y", index)
+                    instance.get("AllowParts") == "Y", physical_index)
         if ref in records:
             previous = identities[ref]
-            multipart = previous[2] and identity[2] and previous[:2] == identity[:2]
+            same_identity = previous[1] == identity[1] and (
+                identity[1] is not None or previous[0] == identity[0])
+            multipart = previous[2] and identity[2] and same_identity
             if multipart:
                 # DipTrace stores each unit, including the power unit, as an
                 # instance. Their displayed Name/Value can differ. The lowest
-                # ComponentPart (normally 0) represents the physical BOM part.
-                if index >= previous[3]:
+                # PartNumber (falling back to ComponentPart) represents the BOM part.
+                if physical_index >= previous[3]:
                     continue
             elif records[ref] != record:
                 raise ValueError(f"Inconsistent schematic parts for {ref}")
@@ -142,7 +147,12 @@ def grouped_rows(records, include_lcsc=True):
 def expand_rows(rows):
     records = {}
     for row in rows:
-        refs = REFS.findall(str(row.get("RefDes", "")))
+        raw_refs = str(row.get("RefDes", ""))
+        refs = REFS.findall(raw_refs)
+        # Named PCB-only items (for example BOOT solder jumpers) can have
+        # letter-only designators; preserve them when reloading saved JSON.
+        if not refs and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", raw_refs.strip()):
+            refs = [raw_refs.strip()]
         if not refs:
             raise ValueError(f"JSON row has no designators: {row!r}")
         for ref in refs:

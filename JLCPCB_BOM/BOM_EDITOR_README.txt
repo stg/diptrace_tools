@@ -38,8 +38,12 @@ and power symbols are excluded. Patterns are resolved through the component and
 pattern library links. Multipart symbols are counted once by designator.
 Grouping uses exact Name, Value, Pattern and LCSC values, with natural designator
 order. Empty Name or Value fields remain empty.
-Multipart components use the main unit (lowest ComponentPart) for BOM fields;
-other units may have different display text without causing a load error.
+Multipart components use the main unit (lowest PartNumber, falling back to
+ComponentPart) for BOM fields. Shared UpdateId identifies the physical part,
+including XML exports with separate styles per unit. Other units may have
+different display text without causing a load error.
+Letter-only PCB designators such as BOOT are preserved in the JSON; DNM/DNP
+rules can exclude these copper-only items from assembly output.
 
 Grid
 ----
@@ -256,6 +260,25 @@ already present in the primary or alternate list is left alone. Add as alternate
 keeps the current output selection and copies primary component fields with a
 review note; edit those fields if the substitute differs. Blank workbook numbers do
 not clear existing JSON assignments. Import edits are saved with Save JSON.
+
+Stock check displays the current output components, footprints and LCSC numbers
+with JLCPCB stock, available idle resale stock and LCSC stock. Excluded parts are
+omitted and selected alternates are used. Values are held in memory across projects
+while the editor runs; reopening checks unknown values and retries errors. Values
+update as results arrive. Refresh checks all displayed numbers again, replacing
+values as they arrive. Abort or closing the dialog keeps values already shown.
+Unknown values are blank; No data is yellow and Fetch failed is red.
+The supplier website interfaces and stock may change.
+
+Order quantity is the number of boards. Each line shows quantity per board,
+required quantity, and JLCPCB and LCSC unit and line prices in USD. All returned
+price breaks are kept in memory and changing the quantity recalculates prices.
+Below the LCSC minimum quoted quantity, the unit price and line price for that
+minimum are shown in yellow, with the minimum labeled next to the line price.
+Stock below the total requirement for a part is red; stock below twice that
+requirement is yellow. The requirement combines lines sharing a part number.
+Idle parts are fallback stock and are green when they cover the requirement.
+Prices exclude assembly fees, attrition, shipping and tax.
 
 Check with AI uses a temporary snapshot of the current project, including unsaved
 edits, chosen alternatives and notes. It needs no workbook or placement CSV and
