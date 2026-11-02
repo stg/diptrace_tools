@@ -46,6 +46,19 @@ class ViewerTests(unittest.TestCase):
         self.assertIsNone(self.window.worker)
         self.assertFalse(self.window.preview_error,self.window.preview_error)
 
+    def test_markings_checkbox_saves_and_does_not_enable_copper_layers(self):
+        recipe=default_recipe(Board(self.source)); path=self.root/'markings.json'
+        recipe['replication'].update(tracks=False,vias=False,markings=True)
+        write_json(path,recipe); self.window.open_path(path,ask=False)
+        self.assertIn('markings',self.window.copy_checks)
+        self.assertTrue(self.window.copy_checks['markings'].isChecked())
+        self.assertTrue(all(not box.isEnabled() for box in self.window.layer_widgets.values()))
+        self.window.copy_checks['markings'].setChecked(False)
+        self.window.save()
+        self.assertFalse(json.loads(path.read_text())['replication']['markings'])
+        self.window.open_path(path,ask=False)
+        self.assertFalse(self.window.copy_checks['markings'].isChecked())
+
     def test_xml_save_as_and_recipe_round_trip(self):
         recipe = self.root/'study.json'
         with patch.object(ui.QFileDialog,'getSaveFileName',return_value=(str(recipe),'')):

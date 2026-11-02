@@ -1,9 +1,10 @@
 from copy import deepcopy
 import math
 import unittest
+from unittest.mock import patch
 from lxml import etree as ET
 from layout_core import (Board, default_recipe, group_refs, load_sizes, size_match,
-                         polygon_gap, terminal_paths, replicate, transform_for, transform_point, migrate_view, migrate_replication, grid_cell, interlink_group_map, repair_ratlines, repair_net_membership, validate_board)
+                         polygon_gap, terminal_paths, replicate, transform_for, transform_point, migrate_view, migrate_replication, grid_cell, interlink_group_map, repair_ratlines, repair_net_membership, validate_board, shared_group_nets)
 
 
 def fixture():
@@ -89,11 +90,153 @@ def linked_grid(via=False):
     return Board(data=ET.tostring(b.root)),recipe
 
 
+def shared_branches():
+    """One shared pad per group, with local ends and unrelated shared copper."""
+    b=fixture()
+    for net in b.nets.values():
+        for trace in list(net.find('Traces')):
+            net.find('Traces').remove(trace)
+    for ref in ('R3','R4','STATICVIA2'):
+        b.parts[ref].element.find('./Pads/Pad').set('NetId','0')
+    b.nets['0'].find('Name').text='Common'
+    pattern=b.parts['R1'].footprint
+    ET.SubElement(pattern.find('Pads'),'Pad',Id='2',X='0',Y='.2')
+    for ref,nid in [('R1','1'),('R3','2')]:
+        ET.SubElement(b.parts[ref].element.find('Pads'),'Pad',Id='2',NetId=nid)
+    net=ET.SubElement(b.board.find('Nets'),'Net',Id='2')
+    ET.SubElement(net,'Name').text='Other signal'; ET.SubElement(net,'Pads'); ET.SubElement(net,'Traces')
+    for cid,x in [('7',30),('8',31),('9',3)]:
+        via=deepcopy(b.by_id['5'].element); via.set('Id',cid); via.set('X',str(x))
+        via.find('RefDes').text='StaticVia'+cid; b.board.find('Components').append(via)
+    b.reindex()
+    def trace(nid,tid,a,z,start,end):
+        t=ET.SubElement(b.nets[nid].find('Traces'),'Trace',Id=str(tid),
+            Connected1='Pad',Object1=a,SubObject1='1',Point1='-1',
+            Connected2='Free' if z is None else 'Pad',Object2=z or '-1',SubObject2='1',Point2='-1')
+        ps=ET.SubElement(t,'Points')
+        for i,(x,y) in enumerate([start,end]):
+            ET.SubElement(ps,'Point',Id=str(i),X=str(x),Y=str(y),Lay='0',Width='.1',PairPoint='-1')
+        return t
+    trace('0',0,'0','5',(0,0),(1,0))
+    trace('0',1,'2','6',(10,0),(11,0))
+    trace('0',2,'0',None,(0,0),(0,2))
+    trace('0',3,'2',None,(10,0),(10,2))
+    trace('0',4,'0','4',(0,0),(5,0))  # External pad, not an open end.
+    trace('0',5,'7','8',(30,0),(31,0))  # Unrelated island on the same net.
+    trace('0',6,'0','9',(0,0),(3,0))
+    trace('0',7,'9','3',(3,0),(12,0))  # A through via, not a terminal branch.
+    for nid,cid,x in [('1','0',0),('2','2',10)]:
+        trace(nid,0,cid,None,(x,.2),(x,3)).set('SubObject1','2')
+    repair_net_membership(b)
+    b=Board(data=ET.tostring(b.root))
+    r=default_recipe(b); r['groups']=[{'refs':['R1']},{'refs':['R3']}]
+    r['replication'].update(mode='Arrange existing groups',dx=10,count=2)
+    return b,r
+
+
+def external_header():
+    b=fixture()
+    for cid in ('1','3','5','6'):
+        b.by_id[cid].element.getparent().remove(b.by_id[cid].element)
+    header=b.by_id['4'].element; header.set('X','2'); header.find('RefDes').text='J1'
+    other=deepcopy(header); other.set('Id','7'); other.set('X','12')
+    other.find('RefDes').text='J2'; other.find('./Pads/Pad').set('NetId','1')
+    b.board.find('Components').append(other)
+    for net in b.nets.values():
+        for trace in list(net.find('Traces')):
+            net.find('Traces').remove(trace)
+    t=ET.SubElement(b.nets['0'].find('Traces'),'Trace',Id='0',Connected1='Pad',Object1='0',
+        SubObject1='1',Point1='-1',Connected2='Pad',Object2='4',SubObject2='1',Point2='-1')
+    ps=ET.SubElement(t,'Points')
+    for i,x in enumerate((0,1,2)):
+        ET.SubElement(ps,'Point',Id=str(i),X=str(x),Y='0',Lay='0',Width='.1')
+    b.reindex(); repair_net_membership(b); b=Board(data=ET.tostring(b.root))
+    r=default_recipe(b); r['groups']=[{'refs':['R1']},{'refs':['R3']}]
+    r['replication'].update(mode='Arrange existing groups',dx=10,count=2)
+    return b,r
+
+
 class LayoutTests(unittest.TestCase):
     def recipe(self,b):
         r = default_recipe(b); r['groups'] = [{'name':'Source','refs':['R1','R2']},{'name':'Target','refs':['R3','R4']}]
         r['view'].update(tracks=True,vias=True); r['replication'].update(dx=4,count=3)
         return r
+
+    def test_case_colliding_via_labels_keep_ids_nets_and_geometry(self):
+        b = fixture(); b.by_id['6'].element.find('RefDes').text = 'STATICVIA1'
+        data = ET.tostring(b.root)
+        out = Board(data=data)
+        self.assertEqual(out.data,data)
+        self.assertNotEqual(out.by_id['5'].ref,out.by_id['6'].ref)
+        self.assertEqual(out.by_id['6'].id,'6')
+        self.assertEqual(out.by_id['6'].element.find('./Pads/Pad').get('NetId'),'1')
+        self.assertEqual((out.by_id['6'].x,out.by_id['6'].y),(11,0))
+        self.assertEqual(out.traces['1','0'].get('Object2'),'6')
+        normalized = ET.tostring(out.root); out.reindex()
+        self.assertEqual(ET.tostring(out.root),normalized)
+        for collision in ('ref','id'):
+            bad = fixture()
+            if collision=='ref': bad.parts['R2'].element.find('RefDes').text='R1'
+            else: bad.by_id['6'].element.set('Id','5')
+            with self.assertRaises(ValueError): Board(data=ET.tostring(bad.root))
+
+    def test_generated_vias_use_diptrace_label_case(self):
+        b=fixture(); r=self.recipe(b)
+        out,_=replicate(b,r)
+        new=[p for cid,p in out.by_id.items() if cid not in b.by_id and p.via]
+        self.assertTrue(new)
+        self.assertTrue(all(p.element.findtext('RefDes').startswith('StaticVia') for p in new))
+
+    def test_markings_copy_local_offsets_rotations_and_settings_only(self):
+        for enabled in (False,True):
+            b=fixture(); source=b.parts['R1'].element; target=b.parts['R3'].element
+            for part,size,x,text in [(source,'7','1.25','source data'),(target,'4','9','target data')]:
+                part.set('MarkingFontSize',size); part.set('MarkingFontType','TrueType')
+                part.set('CustomMarkingFont','Y' if part is source else 'N')
+                mark=ET.SubElement(part,'RefDesMarking')
+                ET.SubElement(mark,'Silk',Show='Show',Align='Position',X=x,Y='-.4',Angle='.3')
+                ET.SubElement(mark,'Assy',Show='Hide',X='0',Y='1',Angle='.8')
+                field=ET.SubElement(ET.SubElement(part,'AddFields'),'AddField',Type='Text')
+                ET.SubElement(field,'Name').text='Vendor'; ET.SubElement(field,'Text').text=text
+                ET.SubElement(field,'Silk',Show='Show',X=x,Y='2',Angle='.5')
+            target.find('Name').text='Destination'; ET.SubElement(target,'Value').text='47k'
+            before=ET.tostring(b.root)
+            r=self.recipe(b); r['replication'].update(mode='Arrange existing groups',
+                tracks=False,vias=False,markings=enabled,layout='Rotational',
+                automatic_angle=False,angle_deg=90,center_x=0,center_y=0)
+            out,_=replicate(b,r); copied=out.parts['R3'].element
+            reference=source if enabled else target
+            self.assertEqual(copied.get('MarkingFontSize'),reference.get('MarkingFontSize'))
+            self.assertEqual(copied.get('CustomMarkingFont'),reference.get('CustomMarkingFont'))
+            self.assertEqual(copied.find('RefDesMarking/Silk').attrib,reference.find('RefDesMarking/Silk').attrib)
+            self.assertEqual(copied.find('RefDesMarking/Assy').attrib,reference.find('RefDesMarking/Assy').attrib)
+            self.assertEqual(copied.find('AddFields/AddField/Silk').attrib,reference.find('AddFields/AddField/Silk').attrib)
+            self.assertEqual(copied.findtext('RefDes'),'R3')
+            self.assertEqual(copied.findtext('Name'),'Destination')
+            self.assertEqual(copied.findtext('Value'),'47k')
+            self.assertEqual(copied.findtext('AddFields/AddField/Text'),'target data')
+            self.assertAlmostEqual(out.parts['R3'].angle,math.pi/2,places=7)
+            if enabled:
+                for actual,expected in zip(out.local_to_board(out.parts['R3'],(1.25,-.4)),(.4,1.25)):
+                    self.assertAlmostEqual(actual,expected,places=7)
+            self.assertEqual(ET.tostring(b.root),before)
+
+    def test_create_without_markings_uses_defaults(self):
+        b=fixture(); element=b.parts['R1'].element; element.set('MarkingFontSize','7')
+        element.set('CustomMarkingFont','Y')
+        ET.SubElement(ET.SubElement(element,'RefDesMarking'),'Silk',X='1',Y='2',Angle='.3')
+        r=self.recipe(b); r['replication'].update(count=2,markings=False,tracks=False,vias=False)
+        out,groups=replicate(b,r); copied=out.parts[groups[1]['refs'][0]].element
+        self.assertIsNone(copied.get('MarkingFontSize')); self.assertIsNone(copied.find('RefDesMarking'))
+        self.assertIsNone(copied.get('CustomMarkingFont'))
+        self.assertEqual(element.get('MarkingFontSize'),'7')
+
+    def test_default_marking_font_clears_destination_custom_flag(self):
+        b=fixture(); b.parts['R3'].element.set('CustomMarkingFont','Y')
+        r=self.recipe(b); r['replication'].update(mode='Arrange existing groups',
+            tracks=False,vias=False,markings=True)
+        out,_=replicate(b,r)
+        self.assertIsNone(out.parts['R3'].element.get('CustomMarkingFont'))
 
     def test_size_priority_and_fallback(self):
         b = fixture(); p = b.parts['R1']
@@ -111,6 +254,87 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(set(r.segments),{('0','0'),('0','1')}); self.assertEqual(r.vias,{'5'})
         self.assertFalse(b.routing(['R1','R2'],True,False,{'0','1'}).segments)
         self.assertFalse(b.routing(['R1','R2'],True,True,{'0'}).segments)
+
+    @patch('layout_core.COPY_EXTERNAL_PAD_BRANCHES',False)
+    def test_shared_net_terminal_vias_and_open_ends_only(self):
+        b,r=shared_branches(); shared=shared_group_nets(b,[['R1'],['R3']])
+        self.assertEqual(shared,{'0'})
+        route=b.routing(['R1'],True,True,{'0','1'},shared)
+        self.assertEqual(route.segments,{('0','0'):{0},('0','2'):{0}})
+        self.assertEqual(route.vias,{'5'})
+        self.assertFalse(b.routing(['R1'],True,True,{'1'},shared).segments)
+        no_vias=b.routing(['R1'],True,False,{'0','1'},shared)
+        self.assertEqual(no_vias.segments,{('0','2'):{0}})
+        original=ET.tostring(b.root)
+        out,_=replicate(b,r)
+        copied=out.replication_routing[1]
+        self.assertEqual(len(copied.vias),1)
+        self.assertEqual(sum(map(len,copied.segments.values())),2)
+        for vid in copied.vias:
+            self.assertEqual(out.by_id[vid].element.find('./Pads/Pad').get('NetId'),'0')
+        for key in [('0','4'),('0','5'),('0','6'),('0','7'),('1','0'),('2','0')]:
+            self.assertEqual(ET.tostring(out.traces[key]),ET.tostring(b.traces[key]))
+        self.assertEqual(ET.tostring(b.root),original)
+        again,_=replicate(out,r)
+        self.assertEqual(len(again.parts),len(out.parts))
+        self.assertEqual(len(again.traces),len(out.traces))
+
+    def test_create_retains_shared_net_for_single_pad_branch(self):
+        b,r=shared_branches(); r['replication']['mode']='Create copies'
+        out,groups=replicate(b,r)
+        copied=out.parts[groups[1]['refs'][0]]
+        self.assertEqual(copied.element.find('./Pads/Pad').get('NetId'),'0')
+        self.assertEqual(copied.element.find('./Pads/Pad[@Id="2"]').get('NetId'),'-1')
+        self.assertEqual(set(out.nets),set(b.nets))
+        self.assertEqual(len(out.replication_routing[1].vias),1)
+
+    def test_external_header_endpoint_requires_net_layer_and_position(self):
+        for case in ('match','wrong net','wrong layer','offset','ambiguous','disabled'):
+            with self.subTest(case=case):
+                b,r=external_header(); header=b.parts['J2'].element
+                if case=='wrong net':
+                    header.find('./Pads/Pad').set('NetId','0')
+                if case=='wrong layer':
+                    style=ET.SubElement(b.root.find('Library'),'PadStyle',Name='S',Type='Surface',Side='Top')
+                    ET.SubElement(style,'MainStack',Shape='Rectangle',Width='.5',Height='.5')
+                    b.parts['J2'].footprint.find('./Pads/Pad').set('Style','S')
+                    header.set('Side','Bottom')
+                if case=='offset': header.set('Y','.1')
+                if case=='ambiguous':
+                    extra=deepcopy(header); extra.set('Id','8'); extra.find('RefDes').text='J3'
+                    b.board.find('Components').append(extra)
+                b.reindex(); repair_net_membership(b); b=Board(data=ET.tostring(b.root))
+                original=ET.tostring(b.root)
+                with patch('layout_core.COPY_EXTERNAL_PAD_BRANCHES',case!='disabled'):
+                    out,_=replicate(b,r)
+                    self.assertEqual(ET.tostring(b.root),original)
+                    traces=out.nets['1'].findall('./Traces/Trace')
+                    if case=='disabled':
+                        self.assertFalse(traces)
+                        continue
+                    self.assertEqual(len(traces),1)
+                    trace=traces[0]
+                    self.assertEqual(trace.get('Connected2'),'Pad' if case=='match' else 'Free')
+                    if case=='match':
+                        self.assertEqual((trace.get('Object2'),trace.get('SubObject2')),('7','1'))
+                    self.assertEqual([(float(p.get('X')),float(p.get('Y'))) for p in trace.findall('./Points/Point')],[(10,0),(11,0),(12,0)])
+                    again,_=replicate(out,r)
+                    self.assertEqual(len(again.traces),len(out.traces))
+
+    def test_external_header_attachment_follows_rotation_and_through_hole_layers(self):
+        b,r=external_header()
+        r['replication'].update(layout='Rotational',automatic_angle=False,angle_deg=90,center_x=0,center_y=0)
+        b.parts['J2'].element.set('X','0'); b.parts['J2'].element.set('Y','2')
+        b.parts['J2'].element.set('Side','Bottom')  # Through-hole is accessible on Top.
+        b.reindex()
+        with patch('layout_core.COPY_EXTERNAL_PAD_BRANCHES',True):
+            out,_=replicate(b,r)
+        trace=out.nets['1'].find('./Traces/Trace')
+        self.assertEqual(trace.get('Connected2'),'Pad')
+        self.assertEqual(trace.get('Object2'),'7')
+        end=trace.findall('./Points/Point')[-1]
+        self.assertAlmostEqual(float(end.get('X')),0,places=7)
+        self.assertAlmostEqual(float(end.get('Y')),2,places=7)
 
     def test_dangling_cycle_excluded_but_parallel_internal_paths_kept(self):
         edges = [('a','x'),('x','b'),('x','y'),('y','z'),('z','x'),('a','c'),('c','b')]
@@ -548,6 +772,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_migration_preserves_old_copy_choices_once(self):
         b = fixture(); recipe = self.recipe(b)
+        recipe['replication'].pop('markings',None)
         for key in ('tracks','vias','layers'): del recipe['replication'][key]
         recipe['view'].update(tracks=False,vias=True,layers=['1'])
         migrate_replication(recipe,b)

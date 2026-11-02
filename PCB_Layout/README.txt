@@ -9,6 +9,10 @@ replication proposals. Source geometry and unknown XML content are preserved
 semantically through lxml. Only proposed output is serialized; source files
 are read-only until an explicit export chooses that same path (with backup).
 
+Markings replication includes local positions, rotations and display settings
+for silkscreen and assembly, while retaining each destination's own text.
+Static-via label collisions are normalized without changing electrical IDs.
+
 layout_viewer.py uses a QGraphicsView canvas and background preview worker.
 The generated preview Board is also the exported Board. Recipe JSON has a
 distinct schema and filename chosen with Save As; it never occupies the BOM

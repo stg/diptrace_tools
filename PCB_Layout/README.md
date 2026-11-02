@@ -56,7 +56,7 @@ Body rotation corrections affect inspection only. They do not rotate the actual 
 | **Create copies** | Add new parts with unused RefDes/IDs and fresh internal nets named `Net N`. Set the total instances, including the source; a grid uses columns × rows. |
 | **Arrange existing groups** | Update the parts already listed in your groups. Put corresponding parts in the same list position. Destination identities and net assignments are preserved. |
 
-With no groups, Create uses the whole PCB. New copies include nets connecting at least two selected pads; connections to outside parts are omitted, and lone external pads become unconnected.
+With no groups, Create uses the whole PCB. New copies include nets connecting at least two selected pads, plus nets carrying selected local branches. Connections to outside parts are omitted, and other lone external pads become unconnected. Shared nets identified across defined groups retain their existing net when creating copies.
 
 | Arrangement | Settings |
 | --- | --- |
@@ -83,11 +83,16 @@ The pivot is the center of the source group's part positions. Positions use the 
 
 ## Choose routing to replicate
 
-**Placement is always copied.** Under **What to replicate**, select **Tracks**, **Vias** and the allowed layers. These choices are separate from the toolbar's viewing checkboxes.
+**Placement is always copied.** Under **What to replicate**, select **Tracks**, **Vias**, **Markings** and the allowed copper layers. These choices are separate from the toolbar's viewing checkboxes.
+
+**Markings** copies silkscreen and assembly marking settings, positions and rotations. Positions and rotations follow the component when the group is rotated or mirrored. Each existing destination keeps its own RefDes, name, value and additional-field text. With Markings off, Arrange preserves destination markings; Create copies uses pattern/board defaults. Existing recipes retain their previous behavior until you enable this option.
 
 - Internal routing follows paths between pads in the group, including intervening vias. External branches and dangling loops are excluded.
+- A net is shared when corresponding pads in all defined groups use the same net. Local branches on these nets are included when they end at a terminal via or an open copper end, even with only one group pad on the net. The selection stops at vias and excludes unrelated copper islands and branches to outside component pads. Existing group-to-group paths are still handled separately.
+- **Experimental outside-pad routing:** `COPY_EXTERNAL_PAD_BRANCHES = True` in `layout_core.py` enables local branches to components outside all groups in Arrange mode. Inline vias can follow the branch; via junctions stop it. The copied endpoint attaches only to a unique coincident pad on the mapped destination net and an accessible copper layer (1 µm coordinate tolerance). If no unique match exists, it stays open. Geometry is never stretched or redirected. Set the constant to `False` to disable both outside-branch selection and endpoint attachment. This does not replace DipTrace DRC.
 - Connections are identified by the XML's **net, pad and trace references**, not by whether drawn lines touch a pad.
 - Tracks through vias require **Vias**. Vias alone can be copied as standalone static vias.
+- Case-colliding static-via labels are made unique in the proposed output; their electrical IDs and connections are preserved.
 - Arrange also repeats interlinks touching the source group when the destination pads belong to the matching existing net.
 - When spacing changes, interlink bends are copied and attached endpoints move to their destination pads. End segments can change shape; the tool does not route around obstacles.
 

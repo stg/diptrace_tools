@@ -21,6 +21,11 @@ SIZES_PATH = APP_DIR / 'component_sizes.json'
 SETTINGS_PATH = APP_DIR / 'settings.json'
 DEFAULTS_PATH = APP_DIR / 'project_defaults.json'
 
+# Experimental: copy local routes to outside pads in Arrange mode, and attach
+# copied free endpoints only at a unique coincident pad on the mapped net/layer.
+COPY_EXTERNAL_PAD_BRANCHES = True
+PAD_ENDPOINT_TOLERANCE_MM = .001
+
 
 def write_json(path, data):
     path = Path(path)
@@ -104,6 +109,7 @@ def migrate_replication(recipe, board):
     settings.setdefault('rotate_odd_axis','Rows')
     settings.setdefault('grid_order','Row first')
     settings.setdefault('preserve_skipped_routing',True)
+    settings.setdefault('markings',settings.get('mode')=='Create copies')
     settings.pop('grid_rotation_offset_x_mm',None)
     settings.pop('grid_rotation_offset_y_mm',None)
     for key in ('tracks','vias'):
@@ -243,7 +249,28 @@ class Board:
         finalized once after all changes, rather than once per instance.
         """
         self.parts, self.by_id = {}, {}
-        for e in self.board.findall('./Components/Component'):
+        placed = [e for e in self.board.findall('./Components/Component') if e.get('X') is not None]
+        reserved = {e.findtext('RefDes','').upper() for e in placed}
+        component_refs = {e.findtext('RefDes','').upper() for e in placed if e.get('Type') != 'Via'}
+        seen_vias = set()
+        next_via = max([int(m.group(1)) for ref in reserved
+                        if (m := re.fullmatch(r'STATICVIA(\d+)',ref))]+[0])+1
+        # DipTrace can reuse a counter when old generated names use different
+        # case. Via identity/connectivity use Id, not this display label.
+        for e in placed:
+            if e.get('Type') != 'Via':
+                continue
+            ref = e.findtext('RefDes','').upper()
+            if not ref or ref in seen_vias or ref in component_refs:
+                while 'STATICVIA'+str(next_via) in reserved:
+                    next_via += 1
+                label = e.find('RefDes')
+                if label is None:
+                    label = ET.SubElement(e,'RefDes')
+                label.text = 'StaticVia'+str(next_via)
+                ref = label.text.upper(); reserved.add(ref); next_via += 1
+            seen_vias.add(ref)
+        for e in placed:
             if e.get('X') is None:
                 continue
             ref = e.findtext('RefDes', '').upper()
@@ -363,8 +390,8 @@ class Board:
         polygon = hull([p for line,_ in paths for p in line])
         return paths, polygon if len(polygon) >= 3 else [], 'Component outline' if outlines else 'Silkscreen' if paths else 'No body geometry', -1
 
-    def routing(self, group, include_tracks, include_vias, layers):
-        """Only copper on paths between selected pads; omit all external branches."""
+    def routing(self, group, include_tracks, include_vias, layers, shared_nets=(), external_pads=()):
+        """Internal paths, plus local via/open-ended branches on shared nets."""
         ids = {self.parts[r].id for r in group}
         if not include_tracks and not include_vias:
             return Routing({}, set())
@@ -372,8 +399,10 @@ class Board:
         for cid in ids:
             for pad in self.by_id[cid].element.findall('./Pads/Pad'):
                 counts[pad.get('NetId')] += 1
-        relevant_nets = {nid for nid,count in counts.items() if count >= 2 and nid not in (None,'-1')}
-        adjacency = defaultdict(set); edge_data = defaultdict(list); terminals = set()
+        shared_nets = set(shared_nets) & counts.keys()
+        external_pads = set(external_pads) - ids
+        relevant_nets = {nid for nid,count in counts.items() if count >= 2 or nid in shared_nets or external_pads} - {None,'-1'}
+        adjacency = defaultdict(set); edge_data = defaultdict(list); terminals = set(); open_ends = set(); outside_ends = set()
         def edge(a,b,kind):
             if a == b:
                 return
@@ -381,11 +410,13 @@ class Board:
             edge_data[frozenset((a,b))].append(kind)
         def pad_node(cid, pid):
             part = self.by_id.get(cid)
-            if part is None or (cid not in ids and not (part.via and include_vias)):
+            if part is None or (cid not in ids and cid not in external_pads and not (part.via and include_vias)):
                 return None
             node = ('pad',cid,pid)
             if cid in ids:
                 terminals.add(node)
+            elif cid in external_pads:
+                outside_ends.add(node)
             return node
         for (nid,tid), trace in self.traces.items():
             if nid not in relevant_nets:
@@ -408,6 +439,8 @@ class Board:
                 if layer not in layers:
                     continue
                 kind = trace.get('Connected'+side)
+                if kind == 'Free' and nid in shared_nets:
+                    open_ends.add(endpoint)
                 if kind == 'Pad':
                     node = pad_node(trace.get('Object'+side),trace.get('SubObject'+side))
                     if node is not None:
@@ -423,6 +456,41 @@ class Board:
                         if match is not None:
                             edge(endpoint,('point',nid,target.get('Id'),target_point,layer),('attach',))
         chosen = terminal_paths(adjacency, terminals)
+        if shared_nets or external_pads:
+            # Walk outward from group pads. Shared-net branches stop at vias;
+            # outside-pad branches may pass an inline via, not a via junction.
+            # An omitted external pad is never treated as a free copper end.
+            seeds = {node for node in terminals if external_pads or any(
+                pad.get('Id') == node[2] and pad.get('NetId') in shared_nets
+                for pad in self.by_id[node[1]].element.findall('./Pads/Pad'))}
+            local = defaultdict(set); seen = set(); pending = list(seeds); ends = set()
+            while pending:
+                node = pending.pop()
+                if node in seen:
+                    continue
+                seen.add(node)
+                if node in outside_ends:
+                    ends.add(node)
+                    continue
+                if node[0] == 'pad' and self.by_id[node[1]].via:
+                    nid = self.by_id[node[1]].element.find('./Pads/Pad').get('NetId')
+                    if len(adjacency[node]) == 1 and include_vias and nid in shared_nets:
+                        ends.add(node)
+                    # Follow an inline via towards an outside pad, but stop at
+                    # via junctions so a shared bus does not become a template.
+                    if not external_pads or len(adjacency[node]) != 2:
+                        continue
+                if node in open_ends:
+                    ends.add(node)
+                for other in adjacency[node]:
+                    # Layer transitions belong to the existing internal-path
+                    # selection; do not follow them into a wider plane route.
+                    if any(kind[0] == 'embedded' for kind in edge_data[frozenset((node,other))]):
+                        continue
+                    local[node].add(other); local[other].add(node)
+                    if other not in seen:
+                        pending.append(other)
+            chosen.update(terminal_paths(local,seeds | ends))
         segments = defaultdict(set); via_ids = set(); embedded = set()
         for pair in chosen:
             for node in pair:
@@ -435,6 +503,20 @@ class Board:
                     embedded.add(kind[1:])
         # Vias may be displayed/copied without tracks, but only if internally connected.
         return Routing(dict(segments), via_ids if include_vias else set(), ids | via_ids,embedded)
+
+
+def shared_group_nets(board, groups):
+    """Nets unchanged at corresponding pads across all defined groups."""
+    if len(groups) < 2 or any(len(g) != len(groups[0]) for g in groups):
+        return set()
+    shared = set()
+    for slot,ref in enumerate(groups[0]):
+        for pad in board.parts[ref].element.findall('./Pads/Pad'):
+            nid,pid = pad.get('NetId'),pad.get('Id')
+            if nid in board.nets and all(any(p.get('Id') == pid and p.get('NetId') == nid
+                    for p in board.parts[group[slot]].element.findall('./Pads/Pad')) for group in groups[1:]):
+                shared.add(nid)
+    return shared
 
 
 def terminal_paths(adjacency, terminals):
@@ -561,6 +643,61 @@ def intervals(edges):
         else:
             result.append((index,index+1))
     return result
+
+
+def _marking_node(node):
+    return isinstance(node.tag,str) and node.tag.endswith('Marking')
+
+
+def _marking_attribute(key):
+    return key.startswith('Marking') or key == 'CustomMarkingFont'
+
+
+def clear_markings(element):
+    """Use board/pattern defaults for a new copy without source overrides."""
+    for key in list(element.attrib):
+        if _marking_attribute(key):
+            del element.attrib[key]
+    for child in list(element):
+        if _marking_node(child):
+            element.remove(child)
+    for field in element.findall('./AddFields/AddField'):
+        for key in list(field.attrib):
+            if key != 'Type':
+                del field.attrib[key]
+        for child in list(field):
+            if child.tag in ('Silk','Assy') or _marking_node(child):
+                field.remove(child)
+
+
+def copy_markings(source, target):
+    """Copy component-local marking positions/angles, retaining target text."""
+    for key in list(target.attrib):
+        if _marking_attribute(key):
+            del target.attrib[key]
+    target.attrib.update({key:value for key,value in source.attrib.items() if _marking_attribute(key)})
+    old = [child for child in target if _marking_node(child)]
+    at = target.index(old[0]) if old else next((i for i,c in enumerate(target) if c.tag=='Pads'),len(target))
+    for child in old:
+        target.remove(child)
+    for child in source:
+        if _marking_node(child):
+            target.insert(at,deepcopy(child)); at += 1
+    fields = {(f.get('Type'),f.findtext('Name','')):f for f in source.findall('./AddFields/AddField')}
+    for field in target.findall('./AddFields/AddField'):
+        original = fields.get((field.get('Type'),field.findtext('Name','')))
+        if original is None:
+            continue
+        for key in list(field.attrib):
+            if key != 'Type':
+                del field.attrib[key]
+        field.attrib.update({key:value for key,value in original.attrib.items() if key!='Type'})
+        for child in list(field):
+            if child.tag in ('Silk','Assy') or _marking_node(child):
+                field.remove(child)
+        for child in original:
+            if child.tag in ('Silk','Assy') or _marking_node(child):
+                field.append(deepcopy(child))
 
 
 def move_component(element, board, transform):
@@ -723,7 +860,7 @@ def replicate_interlinks(source, result, recipe, groups, generated_routes, cance
                     while 'STATICVIA'+str(index) in occupied:
                         index += 1
                     ref = 'STATICVIA'+str(index); occupied.add(ref)
-                    element.set('Id',cid); element.set('UpdateId','-1'); element.find('RefDes').text = ref
+                    element.set('Id',cid); element.set('UpdateId','-1'); element.find('RefDes').text = 'StaticVia'+str(index)
                     for pad in element.findall('./Pads/Pad'):
                         pad.set('NetId',nid)
                         ET.SubElement(result.nets[nid].find('Pads'),'Item',Comp=cid,Pad=pad.get('Id'))
@@ -1046,6 +1183,42 @@ def validate_board(board, original=None):
             raise ValueError('Ratline connects different nets.')
 
 
+def attach_matching_pad_endpoints(board, traces):
+    """Attach unique same-net/layer pad centres without moving any copper."""
+    candidates = defaultdict(list)
+    tolerance = PAD_ENDPOINT_TOLERANCE_MM
+    for part in board.parts.values():
+        positions = board.pads(part)
+        for pad in part.element.findall('./Pads/Pad'):
+            pid,nid = pad.get('Id'),pad.get('NetId')
+            if pid not in positions or nid not in board.nets:
+                continue
+            x,y = positions[pid]
+            candidates[math.floor(x/tolerance),math.floor(y/tolerance)].append(
+                (part,pid,nid,x,y,board.pad_layers(part,pid)))
+    for trace in traces:
+        if trace.getparent() is None:
+            continue
+        nid = trace.getparent().getparent().get('Id')
+        points = trace.findall('./Points/Point')
+        if len(points) < 2:
+            continue
+        for side,index in [('1',0),('2',len(points)-1)]:
+            if trace.get('Connected'+side) != 'Free':
+                continue
+            point = points[index]
+            x,y = number(point.get('X'))*board.factor,number(point.get('Y'))*board.factor
+            layer = points[1 if side == '1' else -1].get('Lay')
+            bx,by = math.floor(x/tolerance),math.floor(y/tolerance)
+            matches = [(part,pid) for dx in (-1,0,1) for dy in (-1,0,1)
+                       for part,pid,net,px,py,layers in candidates.get((bx+dx,by+dy),())
+                       if net == nid and layer in layers and math.hypot(px-x,py-y) <= tolerance]
+            if len(matches) == 1:
+                part,pid = matches[0]
+                trace.set('Connected'+side,'Pad'); trace.set('Object'+side,part.id)
+                trace.set('SubObject'+side,pid); trace.set('Point'+side,'-1')
+
+
 def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,total: None):
     """Return a validated proposed PCB and its groups; never writes input files."""
     groups = group_refs(source,recipe); settings = recipe['replication']
@@ -1068,7 +1241,13 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
     if not 2 <= total <= 1000:
         raise ValueError('Replication needs 2–1000 total instances, including the source.')
     layers = set(settings['layers']); tracks = settings['tracks']; vias = settings['vias']
-    routes = source.routing(source_refs,tracks,vias,layers)
+    shared_nets = shared_group_nets(source,groups)
+    grouped_ids = {source.parts[ref].id for group in groups for ref in group}
+    outside_ids = {p.id for p in source.parts.values() if not p.via and p.id not in grouped_ids} if COPY_EXTERNAL_PAD_BRANCHES and not clone and tracks else set()
+    routes = source.routing(source_refs,tracks,vias,layers,shared_nets,outside_ids)
+    base_routes = source.routing(source_refs,tracks,vias,layers,shared_nets) if outside_ids else routes
+    external_branch_nets = {nid for (nid,tid),edges in routes.segments.items()
+                            if edges - base_routes.segments.get((nid,tid),set())}
     fragments = routing_fragments(source,routes) if tracks else []
     # Placement never rewires pads. Only nets carrying copied copper need a
     # destination mapping; external pins may legitimately differ between groups.
@@ -1076,6 +1255,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
     required_nets.update(pad.get('NetId') for vid in routes.vias
                          for pad in source.by_id[vid].element.findall('./Pads/Pad'))
     required_nets.difference_update((None,'-1'))
+    internal_nets.update(required_nets)
     result = Board(data=ET.tostring(source.root,encoding='utf-8',xml_declaration=True))
     components = result.board.find('Components'); nets_container = result.board.find('Nets')
     next_component = max([int(p.id) for p in result.parts.values()]+[-1])+1
@@ -1085,6 +1265,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
     next_name = 1
     generated = [{'name':recipe['groups'][source_index].get('name','Source') if recipe['groups'] else 'Source','refs':source_refs}]
     generated_routes = [routes]
+    copied_traces = []
     embedded = []
     if vias and not tracks:
         for nid,tid,i in routes.embedded:
@@ -1103,7 +1284,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
             target_transform = transform_for(settings,target_index,total,center)
             source_transform = transform_for(settings,source_index,total,center)
             transform = (target_transform[0]-source_transform[0],target_transform[1]-source_transform[1],target_transform[2]-source_transform[2],target_transform[3],target_transform[4])
-        cmap, nmap, target_refs = {}, {}, []
+        cmap, nmap, target_refs = {}, {nid:nid for nid in shared_nets} if clone else {}, []
         source_parts = [source.parts[r] for r in source_refs]
         if not clone:
             target_refs = ordered[instance]
@@ -1124,7 +1305,10 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
                     if dest not in result.nets or (nid in nmap and nmap[nid] != dest) or (dest in reverse_nets and reverse_nets[dest] != nid):
                         raise ValueError(f'Inconsistent destination net mapping for internal copper: {a.ref} / {b.ref}, pad {pid} (source net {nid}, destination net {dest}).')
                     nmap[nid] = dest; reverse_nets[dest] = nid
-            old_routes = result.routing(target_refs,tracks,vias,layers)
+            # A previous copied branch may have deliberately remained open
+            # because no matching outside pad existed. Replace that stub too.
+            cleanup_ends = shared_nets | {nmap[nid] for nid in external_branch_nets}
+            old_routes = result.routing(target_refs,tracks,vias,layers,cleanup_ends,outside_ids)
             if tracks:
                 protected = routes
                 if any(edges & protected.segments.get(key,set()) for key,edges in old_routes.segments.items()):
@@ -1148,9 +1332,13 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
                     target.set('Flip','Y')
                 elif 'Flip' in target.attrib:
                     del target.attrib['Flip']
+                if settings.get('markings',False):
+                    copy_markings(part.element,target)
                 move_component(target,result,transform)
                 continue
             copied = deepcopy(part.element)
+            if not settings.get('markings',False):
+                clear_markings(copied)
             cid = str(next_component); next_component += 1; cmap[part.id] = cid
             try:
                 prefix, _ = split_reference(part.ref)
@@ -1161,7 +1349,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
                 index += 1
             ref = prefix+str(index); occupied_refs.add(ref)
             prefix_numbers[prefix] = index+1
-            copied.set('Id',cid); copied.set('UpdateId','-1'); copied.find('RefDes').text = ref
+            copied.set('Id',cid); copied.set('UpdateId','-1'); copied.find('RefDes').text = ('StaticVia'+str(index) if part.via and prefix=='STATICVIA' else ref)
             copied.attrib.pop('Group',None)
             for pad in copied.findall('./Pads/Pad'):
                 nid = pad.get('NetId')
@@ -1220,6 +1408,7 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
             if container is None:
                 container = ET.SubElement(result.nets[nid],'Traces')
             container.append(t)
+            copied_traces.append(t)
         new_segments = {}
         new_embedded = set()
         for i,(key,start,end,fragment) in enumerate(fragments):
@@ -1241,6 +1430,8 @@ def replicate(source, recipe, cancelled=lambda: False, progress=lambda current,t
     if clone:
         result = Board(data=ET.tostring(result.root,encoding='utf-8',xml_declaration=True))
     if not clone:
+        if COPY_EXTERNAL_PAD_BRANCHES and tracks:
+            attach_matching_pad_endpoints(result,copied_traces)
         order = [source_index]+[i for i in range(len(groups)) if i != source_index]
         generated = [generated[order.index(i)] for i in range(len(groups))]
         generated_routes = [generated_routes[order.index(i)] for i in range(len(groups))]

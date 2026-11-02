@@ -13,7 +13,8 @@ from Shared.markdown_help import show_help
 from Shared.scrolling import protect_values_from_wheel
 from layout_core import (APP_DIR, SIZES_PATH, SETTINGS_PATH, DEFAULTS_PATH, Board, default_recipe,
                          group_refs, refs, load_sizes, size_match, polygon_gap,
-                         replicate, intervals, write_json, migrate_view, migrate_replication)
+                         replicate, intervals, write_json, migrate_view, migrate_replication, shared_group_nets,
+                         COPY_EXTERNAL_PAD_BRANCHES)
 from lxml import etree as ET
 from PySide6.QtCore import Qt, Signal, QThread, QTimer, QByteArray, QRectF, QEvent
 from PySide6.QtGui import QAction, QColor, QPen, QBrush, QPainterPath, QPolygonF, QTransform, QFont, QKeySequence, QPainter
@@ -289,9 +290,9 @@ class Viewer(QMainWindow):
         side.addLayout(row)
         self.layers_panel = QGroupBox('What to replicate'); layers_layout = QVBoxLayout(self.layers_panel)
         columns = QHBoxLayout(); types = QVBoxLayout(); self.copy_checks = {}
-        for key,label in [('tracks','Tracks'),('vias','Vias')]:
+        for key,label in [('tracks','Tracks'),('vias','Vias'),('markings','Markings')]:
             box = QCheckBox(label); box.setChecked(True); box.toggled.connect(self.change)
-            box.setToolTip('Include this routing in replication. Viewing controls above are independent.')
+            box.setToolTip('Copy silkscreen/assembly marking settings, local positions and rotations; destination field text is retained.' if key=='markings' else 'Include this routing in replication. Viewing controls above are independent.')
             self.copy_checks[key] = box; types.addWidget(box)
         types.addStretch(); columns.addLayout(types)
         self.layer_widgets = {}; self.layers_form = QVBoxLayout(); columns.addLayout(self.layers_form)
@@ -299,7 +300,7 @@ class Viewer(QMainWindow):
         self.preserve_skipped = QCheckBox('Preserve skipped connections'); self.preserve_skipped.setChecked(True)
         self.preserve_skipped.setToolTip('Arrange only: keep existing edge, unmatched and disjoint inter-group routing when no copy fits. If off, remove selected inter-group routing not reproduced by replication.')
         self.preserve_skipped.toggled.connect(self.change); layers_layout.addWidget(self.preserve_skipped)
-        note = QLabel('Placement is always included. Copy internal routing and repeatable inter-group links on the checked layers.'); note.setWordWrap(True); layers_layout.addWidget(note)
+        note = QLabel('Placement is always included. Markings copies silkscreen/assembly formatting. Checked copper layers apply to Tracks and Vias.'); note.setWordWrap(True); layers_layout.addWidget(note)
         self.rep_toggle = QToolButton(); self.rep_toggle.setText('Replication'); self.rep_toggle.setCheckable(True)
         self.rep_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon); self.rep_toggle.setArrowType(Qt.RightArrow)
         self.rep_toggle.toggled.connect(self.toggle_replication); side.addWidget(self.rep_toggle)
@@ -566,7 +567,7 @@ class Viewer(QMainWindow):
 
     def update_controls(self):
         for box in self.layer_widgets.values():
-            box.setEnabled(any(c.isChecked() for c in self.copy_checks.values()))
+            box.setEnabled(any(self.copy_checks[key].isChecked() for key in ('tracks','vias')))
         self.arrangements.setCurrentIndex(self.rep_fields['layout'].currentIndex())
         self.arrangements.setFixedHeight(self.arrangements.currentWidget().sizeHint().height())
         create = self.rep_fields['mode'].currentIndex() == 0
@@ -818,10 +819,13 @@ class Viewer(QMainWindow):
             selected_group = self.show_group.currentIndex()-1
             tracks_count = vias_count = 0
             combined_route = None; combined_drawn = False
+            shared_nets = shared_group_nets(board,groups)
+            grouped_ids = {board.parts[ref].id for group in groups for ref in group}
+            outside_ids = {p.id for p in board.parts.values() if not p.via and p.id not in grouped_ids} if COPY_EXTERNAL_PAD_BRANCHES and self.recipe['replication']['mode'] == 'Arrange existing groups' else set()
             if not use_preview and not self.scope_buttons['Source'].isChecked():
                 visible_refs = [r for i,g in enumerate(groups) if selected_group < 0 or selected_group == i for r in g]
                 if self.checks['tracks'].isChecked() or self.checks['vias'].isChecked():
-                    combined_route = board.routing(visible_refs,True,True,set(board.layers))
+                    combined_route = board.routing(visible_refs,True,True,set(board.layers),shared_nets,outside_ids)
             for index,group in enumerate(groups):
                 if selected_group >= 0 and selected_group != index:
                     continue
@@ -831,7 +835,7 @@ class Viewer(QMainWindow):
                 if combined_route is not None and combined_drawn:
                     draw_routes = False
                 if draw_routes and (self.checks['tracks'].isChecked() or self.checks['vias'].isChecked()):
-                    route = board.replication_routing[index] if use_preview else combined_route if combined_route is not None else board.routing(group,True,True,set(board.layers))
+                    route = board.replication_routing[index] if use_preview else combined_route if combined_route is not None else board.routing(group,True,True,set(board.layers),shared_nets,outside_ids)
                     combined_drawn = True
                     if self.checks['tracks'].isChecked():
                         for key,edges in route.segments.items():

@@ -38,7 +38,8 @@
       "center_x": 0,
       "center_y": 0,
       "automatic_angle": true,
-      "angle_deg": 45
+      "angle_deg": 45,
+      "markings": true
     }
   }
 }
