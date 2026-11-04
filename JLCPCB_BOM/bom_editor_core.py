@@ -17,6 +17,7 @@ from xml.sax.saxutils import escape
 from lxml import etree
 
 import bom_conversions as conversion
+from assembly_alternates import active_group, validate_groups, apply_groups_to_cpl
 from project_config import project_defaults, validate_filename
 from bom_values import SI_PREFIX_EXPONENTS, engineering_magnitude, natural_sort_key, value_sort_key
 
@@ -144,15 +145,21 @@ def grouped_rows(records, include_lcsc=True):
     return rows
 
 
+def row_references(raw_refs):
+    references = []
+    for token in re.split(r"[,;\s]+", str(raw_refs).strip()):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", token):
+            references.append(token.upper())
+        else:
+            references.extend(ref.upper() for ref in REFS.findall(token))
+    return references
+
+
 def expand_rows(rows):
     records = {}
     for row in rows:
         raw_refs = str(row.get("RefDes", ""))
-        refs = REFS.findall(raw_refs)
-        # Named PCB-only items (for example BOOT solder jumpers) can have
-        # letter-only designators; preserve them when reloading saved JSON.
-        if not refs and re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", raw_refs.strip()):
-            refs = [raw_refs.strip()]
+        refs = row_references(raw_refs)
         if not refs:
             raise ValueError(f"JSON row has no designators: {row!r}")
         for ref in refs:
@@ -202,6 +209,29 @@ def selected_component(record):
     return record["Alternates"][selection - 1] if selection else record
 
 
+def publish_files(contents):
+    """Publish a related set of files, restoring prior files if a write fails."""
+    previous = {path: path.read_bytes() if path.exists() else None for path in contents}
+    written = []
+    try:
+        for path, content in contents.items():
+            atomic_write(path, content)
+            written.append(path)
+    except Exception as exc:
+        failures = []
+        for path in reversed(written):
+            try:
+                if previous[path] is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    atomic_write(path, previous[path])
+            except Exception as restore_error:
+                failures.append(f"{path}: {restore_error}")
+        if failures:
+            raise OSError(f"Generation failed ({exc}); restoration also failed: " + "; ".join(failures)) from exc
+        raise
+
+
 def output_record(ref, record):
     record = selected_component(record)
     normalized = conversion.normalized_row({"RefDes": ref, **record})
@@ -210,6 +240,24 @@ def output_record(ref, record):
     return {"Comment": conversion._comment(normalized),
             "Footprint": normalized["Pattern"],
             "JLCPCB Part #（optional）": record.get("LCSC Part #", "")}
+
+
+def project_output_record(project, ref):
+    group = active_group(project, ref)
+    if group:
+        return output_record(ref, group["component"]) if ref == group["anchor"] else None
+    return output_record(ref, project.records[ref])
+
+
+def assembly_records(project):
+    selected = {ref: {field: selected_component(record).get(field, "") for field in JSON_FIELDS}
+                for ref, record in project.records.items()}
+    for group in getattr(project, "assembly_groups", []):
+        if group.get("active", False):
+            for ref in group["references"]:
+                selected.pop(ref, None)
+            selected[group["anchor"]] = {field: group["component"].get(field, "") for field in JSON_FIELDS}
+    return selected
 
 
 def workbook_grid(path):
@@ -275,16 +323,37 @@ def read_generated(path):
     return result
 
 
+class MissingSchematic(FileNotFoundError):
+    def __init__(self, json_path, schematic_path):
+        self.json_path = json_path
+        self.schematic_path = schematic_path
+        super().__init__(f"Schematic referenced by {json_path.name} is unavailable: {schematic_path}")
+
+
 class Project:
-    def __init__(self, path):
-        self.path = Path(path).resolve()
-        self.json_path = self.path.with_suffix(".json")
-        self.source_hash = fingerprint(self.path)
-        self.source = read_schematic(self.path)
+    def __init__(self, path, *, schematic_path=None):
+        self.entry_path = Path(path).resolve()
+        from_json = self.entry_path.suffix.casefold() == ".json"
+        self.json_path = self.entry_path if from_json else self.entry_path.with_suffix(".json")
+        self.document = None
         if self.json_path.exists():
             self.document = json.loads(self.json_path.read_text(encoding="utf-8-sig"))
-            if self.document.get("schema_version") != 1:
-                raise ValueError("Unsupported sidecar JSON schema; expected schema_version 1.")
+            if not isinstance(self.document, dict) or self.document.get("schema_version") not in (1, 2):
+                raise ValueError("Unsupported sidecar JSON schema; expected schema_version 1 or 2.")
+        elif from_json:
+            raise FileNotFoundError(self.json_path)
+        if from_json:
+            source = self.document.get("source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("BOM project JSON must contain a nonempty schematic source path.")
+            self.path = (Path(schematic_path) if schematic_path is not None else self.json_path.parent / source).resolve()
+            if not self.path.is_file():
+                raise MissingSchematic(self.json_path, self.path)
+        else:
+            self.path = self.entry_path
+        self.source_hash = fingerprint(self.path)
+        self.source = read_schematic(self.path)
+        if self.document is not None:
             self.records = expand_rows(self.document["rows"])
         else:
             self.document = {**project_defaults(self.path.stem), "schema_version": 1,
@@ -292,7 +361,12 @@ class Project:
             self.records = {ref: {**row, "Notes": "", "Alternates": [], "Output selection": 0}
                             for ref, row in self.source.items()}
             self.save()
+        self.assembly_groups = deepcopy(self.document.get("assembly_alternatives", []))
+        validate_groups(self.assembly_groups, self.records)
         self.saved_state = self.state()
+        self.saved_source = self.document.get("source")
+        if from_json and schematic_path is not None:
+            self.document["source"] = self.relative_source()
         # New components come from the schematic. Existing JSON values,
         # including edited patterns, remain authoritative on reload.
         for ref, row in self.source.items():
@@ -335,16 +409,36 @@ class Project:
         return self.path.parent / path
 
     def state(self):
-        return json.dumps(self.records, ensure_ascii=False, sort_keys=True)
+        return json.dumps([self.records, getattr(self, "assembly_groups", [])], ensure_ascii=False, sort_keys=True)
 
     @property
     def dirty(self):
-        return self.state() != self.saved_state
+        return self.state() != self.saved_state or self.document.get("source") != self.saved_source
+
+    def relative_source(self):
+        try:
+            return os.path.relpath(self.path, self.json_path.parent)
+        except ValueError:
+            return str(self.path)  # Different Windows drives.
+
+    def document_for_save(self):
+        document = deepcopy(self.document)
+        validate_groups(getattr(self, "assembly_groups", []), self.records)
+        if getattr(self, "assembly_groups", []):
+            document["schema_version"] = 2
+            document["assembly_alternatives"] = deepcopy(self.assembly_groups)
+        else:
+            document.pop("assembly_alternatives", None)
+        document["source"] = self.relative_source()
+        document["rows"] = grouped_rows(self.records)
+        return document
 
     def save(self):
-        self.document["rows"] = grouped_rows(self.records)
-        atomic_write(self.json_path, (json.dumps(self.document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        document = self.document_for_save()
+        atomic_write(self.json_path, (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        self.document = document
         self.saved_state = self.state()
+        self.saved_source = self.document["source"]
 
     def refresh_outputs(self):
         self.outputs = []
@@ -359,7 +453,9 @@ class Project:
     def generate(self):
         # Validate placement data and its explicit units before replacing outputs.
         cpl = self.cpl_path
-        conversion.validate_cpl_input(cpl)
+        cpl_grid = conversion.validate_cpl_input(cpl)
+        validate_groups(self.assembly_groups, self.records)
+        apply_groups_to_cpl(cpl_grid, self.assembly_groups)
         conversion.load_cpl_adjustments(conversion.CPL_ADJUSTMENTS_PATH)
         conversion.load_normalization_rules(force=True)
         bom_output, cpl_output = self.bom_xls, self.cpl_xls
@@ -368,15 +464,25 @@ class Project:
             raise ValueError("cpl_decimals must be an integer from 0 to 9.")
         if str(bom_output).casefold() == str(cpl_output).casefold():
             raise ValueError("BOM and CPL output filenames must differ.")
-        self.save()
+        if self.json_path.resolve() in {bom_output.resolve(), cpl_output.resolve()}:
+            raise ValueError("Output paths must not overwrite the project JSON.")
+        document = self.document_for_save()
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        selected = {ref: {field: selected_component(record)[field] for field in FIELDS}
-                    for ref, record in self.records.items()}
+        selected = {ref: {field: record.get(field, "") for field in FIELDS}
+                    for ref, record in assembly_records(self).items()}
         bom_rows = conversion.assembly_bom_rows(grouped_rows(selected))
-        bom_count = conversion.write_bom_xls(bom_rows, bom_output)
-        self.cpl_report = conversion.convert_cpl_for_bom_rows(
-            cpl, bom_rows, cpl_output, decimal_places=decimal_places)
-        cpl_count = self.cpl_report.rows
+        with tempfile.TemporaryDirectory(prefix="bom-generation-") as temp:
+            staged_bom, staged_cpl = Path(temp)/"bom.xls", Path(temp)/"cpl.xls"
+            bom_count = conversion.write_bom_xls(bom_rows, staged_bom)
+            report = conversion.convert_cpl_for_bom_rows(
+                cpl, bom_rows, staged_cpl, decimal_places=decimal_places, assembly_groups=self.assembly_groups)
+            publish_files({bom_output: staged_bom.read_bytes(), cpl_output: staged_cpl.read_bytes(),
+                           self.json_path: (json.dumps(document, ensure_ascii=False, indent=2)+"\n").encode("utf-8")})
+        self.document = document
+        self.saved_state = self.state()
+        self.saved_source = document["source"]
+        self.cpl_report = report
+        cpl_count = report.rows
         self.refresh_outputs()
         return bom_count, cpl_count
 

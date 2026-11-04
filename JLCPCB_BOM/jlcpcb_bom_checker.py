@@ -199,9 +199,14 @@ def _read_excel_rows(path, with_designators=False):
 
 def load_check_notes(path):
     """Read saved project rows, or the editor's temporary in-memory snapshot."""
-    from bom_editor_core import expand_rows
+    from bom_editor_core import expand_rows, assembly_records
+    from assembly_alternates import validate_groups
+    from types import SimpleNamespace
     document = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    return expand_rows(document["rows"])
+    records = expand_rows(document["rows"])
+    groups = document.get("assembly_alternatives", [])
+    validate_groups(groups, records)
+    return assembly_records(SimpleNamespace(records=records, assembly_groups=groups)) if groups else records
 
 
 def project_check_rows(records):

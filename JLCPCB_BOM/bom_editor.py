@@ -8,6 +8,7 @@ import re
 import sys
 from copy import deepcopy
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QSettings, QItemSelectionModel, QEvent, QTemporaryFile
 from PySide6.QtGui import QColor, QBrush, QAction, QKeySequence, QTextCursor, QTextCharFormat
@@ -19,8 +20,10 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
-from bom_editor_core import Project, FIELDS, grouped_rows, record_group_key, selected_component, REFS, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
+from bom_editor_core import Project, MissingSchematic, FIELDS, grouped_rows, row_references, record_group_key, selected_component, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
 from bom_alternates_dialog import AlternatesDialog
+from assembly_alternates import groups_for, active_group, choose_group
+from bom_editor_core import project_output_record, assembly_records
 from stock_dialog import StockDialog
 from bom_conversions import CPL_ADJUSTMENTS_PATH, MissingCPLFile
 from bom_conversions import load_normalization_rules
@@ -147,7 +150,7 @@ class Editor(QMainWindow):
             toolbar.addWidget(button)
             self.buttons[name] = button
         toolbar.addStretch()
-        self.paths = QLabel("Open a DipTrace .dchxml schematic to begin.")
+        self.paths = QLabel("Open a DipTrace .dchxml schematic or BOM project .json to begin.")
         self.paths.setWordWrap(True)
         self.paths.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self.paths)
@@ -364,7 +367,7 @@ class Editor(QMainWindow):
             item.setData(str(path))
             item.triggered.connect(lambda checked=False, selected=path: self.open_recent(selected))
         if not files:
-            item = self.recent_menu.addAction("No recent schematics")
+            item = self.recent_menu.addAction("No recent projects")
             item.setEnabled(False)
 
     def remember_file(self, path):
@@ -383,14 +386,14 @@ class Editor(QMainWindow):
             if self.open_path(path):
                 return
         elif path:
-            self.log.appendPlainText(f"Previous schematic is unavailable: {path}")
+            self.log.appendPlainText(f"Previous project file is unavailable: {path}")
         self.open_picker()
 
     def open_recent(self, path):
         if not self.discard_ok():
             return
         if not Path(path).is_file():
-            QMessageBox.information(self, "Schematic unavailable", f"This recent file is unavailable:\n{path}")
+            QMessageBox.information(self, "Project unavailable", f"This recent file is unavailable:\n{path}")
             return
         self.open_path(path)
 
@@ -451,7 +454,8 @@ class Editor(QMainWindow):
         """Record one content operation; saving or generating files never enters history."""
         changes = []
         for (ref, field), value in updates.items():
-            previous = self.project.records.get(ref) if field is None else self.project.records[ref][field]
+            previous = getattr(self.project, "assembly_groups", []) if ref is None else (
+                self.project.records.get(ref) if field is None else self.project.records[ref][field])
             if previous != value:
                 changes.append((ref, field, deepcopy(previous), deepcopy(value)))
         if not changes:
@@ -464,7 +468,9 @@ class Editor(QMainWindow):
     def restore_content(self, changes, forward, regroup):
         for ref, field, before, after in changes:
             value = deepcopy(after if forward else before)
-            if field is None:
+            if ref is None:
+                self.project.assembly_groups = value
+            elif field is None:
                 if value is None:
                     self.project.records.pop(ref, None)
                 else:
@@ -480,7 +486,7 @@ class Editor(QMainWindow):
             for refs in self.view_rows:
                 groups = {}
                 for ref in refs:
-                    key = record_group_key(self.project.records[ref])
+                    key = (record_group_key(self.project.records[ref]), ref if groups_for(self.project, ref) else None)
                     groups.setdefault(key, []).append(ref)
                 rows.extend(groups.values())
             self.view_rows = rows
@@ -631,11 +637,11 @@ class Editor(QMainWindow):
     def open_picker(self):
         if not self.discard_ok():
             return
-        directory = str(self.project.path.parent) if self.project else self.settings.value("last_directory", "", type=str)
+        directory = str(self.project.entry_path.parent) if self.project else self.settings.value("last_directory", "", type=str)
         if directory and not Path(directory).is_dir():
             directory = ""
-        path, _ = QFileDialog.getOpenFileName(self, "Open DipTrace schematic", directory,
-                                              "DipTrace schematic XML (*.dchxml)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open BOM project or schematic", directory,
+                                              "BOM projects and schematics (*.json *.dchxml);;BOM project JSON (*.json);;DipTrace schematic XML (*.dchxml)")
         if path:
             self.settings.setValue("last_directory", str(Path(path).resolve().parent))
             self.settings.sync()
@@ -643,15 +649,28 @@ class Editor(QMainWindow):
 
     def open_path(self, path):
         try:
-            project = Project(path)
+            try:
+                project = Project(path)
+            except MissingSchematic as missing:
+                directory = missing.schematic_path.parent
+                if not directory.is_dir():
+                    directory = missing.json_path.parent
+                located, _ = QFileDialog.getOpenFileName(self,
+                    f"Locate schematic for {missing.json_path.name}", str(directory),
+                    "DipTrace schematic XML (*.dchxml)")
+                if not located:
+                    return False
+                project = Project(path, schematic_path=located)
             self.project = project
             self.undo_history.clear()
             self.redo_history.clear()
             self.expanded.clear()
             self.rebuild()
             self.paths.setText(f"Schematic: {project.path}\nJSON: {project.json_path}   •   XLS folder: {project.output_dir}")
-            self.remember_file(project.path)
+            self.remember_file(project.entry_path)
             self.log.appendPlainText(f"Loaded {len(project.records)} components from {project.path.name}; {len(self.view_rows)} groups.")
+            if project.document.get("source") != project.saved_source:
+                self.log.appendPlainText("Schematic location updated; save JSON to remember it.")
             if project.output_errors:
                 self.log.append_message("\n".join(project.output_errors), "error")
             self.update_controls()
@@ -662,14 +681,14 @@ class Editor(QMainWindow):
 
     def reload(self):
         if self.project and self.discard_ok():
-            self.open_path(self.project.path)
+            self.open_path(self.project.entry_path)
 
     def rebuild(self):
         self.clear_output_spans()
         self.view_rows = []
         for row in grouped_rows(self.project.records):
-            refs = REFS.findall(row["RefDes"])
-            if self.expanded.intersection(refs):
+            refs = row_references(row["RefDes"])
+            if self.expanded.intersection(refs) or any(groups_for(self.project, ref) for ref in refs):
                 self.view_rows.extend([[ref] for ref in refs])
             else:
                 self.view_rows.append(refs)
@@ -691,7 +710,7 @@ class Editor(QMainWindow):
         source_critical_mismatch = False
         source_warnings = []
         output_mismatch = False
-        using_alternate = any(project.records[ref].get("Output selection", 0) for ref in refs)
+        using_alternate = any(project.records[ref].get("Output selection", 0) or active_group(project, ref) for ref in refs)
 
         def item(column, text, mismatch=False, tooltip="", warning=False):
             cell = QTableWidgetItem(text)
@@ -752,7 +771,7 @@ class Editor(QMainWindow):
         if note_styles:
             self.table.item(index, 8).setBackground(RED if note_red else YELLOW)
             self.table.item(index, 8).setForeground(INK if note_red else WARNING_INK)
-        expected = {ref: output_record(ref, project.records[ref]) for ref in refs}
+        expected = {ref: project_output_record(project, ref) for ref in refs}
         for column, field in enumerate(("Comment", "Footprint", "JLCPCB Part #（optional）"), OUTPUT_COLUMN):
             values = [expected[ref][field] if expected[ref] is not None else "" for ref in refs]
             shown_values = []
@@ -785,17 +804,24 @@ class Editor(QMainWindow):
             output_mismatch |= mismatch
             tooltip = "Expected: " + display(values) + "\n" + "\n".join(tips)
             item(column, display(shown_values), mismatch or using_alternate, tooltip, warning=using_alternate)
-            if column == OUTPUT_COLUMN and project.records[refs[0]].get("Alternates"):
+            if column == OUTPUT_COLUMN and (project.records[refs[0]].get("Alternates") or groups_for(project, refs[0])):
                 record = project.records[refs[0]]
                 combo = QComboBox(self.table)
+                combo.view().setMinimumWidth(750)
                 for selection in range(len(record["Alternates"]) + 1):
                     candidate = {**record, "Output selection": selection}
                     converted = output_record(refs[0], candidate)
                     component = record if selection == 0 else record["Alternates"][selection - 1]
                     label = component["Name"] or (converted["Comment"] if converted else "") or "(unnamed)"
-                    combo.addItem(("Alt: " if selection else "") + label)
+                    combo.addItem(("Alt: " if selection else "") + label, selection)
                     combo.setItemData(selection, " · ".join(component.get(key, "") for key in (*FIELDS, "Notes") if component.get(key)), Qt.ToolTipRole)
                 combo.setCurrentIndex(record.get("Output selection", 0))
+                for group in groups_for(project, refs[0]):
+                    combo.addItem("Combined " + ", ".join(group["references"]) + " → " + group["anchor"] + ": " + group["component"]["Name"], group["id"])
+                    combo.setItemData(combo.count()-1, "One assembly component at " + group["anchor"] +
+                                      "; replaces " + ", ".join(group["references"]) + ". Individual choices are retained.", Qt.ToolTipRole)
+                    if group.get("active", False):
+                        combo.setCurrentIndex(combo.count()-1)
                 combo.setToolTip("Selected for next generation: " + combo.currentText() + "\n" + tooltip)
                 combo.setProperty("unmerged_tooltip", combo.toolTip())
                 if using_alternate:
@@ -804,14 +830,18 @@ class Editor(QMainWindow):
                     background, foreground = ("#ffe0e0", "#9b2424") if mismatch else ("#e7f1e6", "#202020")
                 combo.setStyleSheet(f"QComboBox {{ background-color: {background}; color: {foreground}; border: 0; padding: 0 3px; }}")
                 combo.setProperty("unmerged_style", combo.styleSheet())
-                combo.activated.connect(lambda selection, selected_refs=tuple(refs): self.select_output_component(selected_refs, selection))
+                combo.activated.connect(lambda selection, selected_refs=tuple(refs), widget=combo:
+                                        self.select_output_component(selected_refs, widget.itemData(selection)))
                 combo.setContextMenuPolicy(Qt.CustomContextMenu)
                 combo.customContextMenuRequested.connect(
                     lambda position, widget=combo: self.row_context_menu(widget.mapTo(self.table.viewport(), position)))
                 self.table.setCellWidget(index, column, combo)
         if any(ref not in project.source for ref in refs):
             status.append("Missing from schematic")
-        if all(value is None for value in expected.values()):
+        combined = active_group(project, refs[0])
+        if combined:
+            status.append("Combined → " + combined["anchor"] + " [" + ", ".join(combined["references"]) + "]")
+        if not combined and all(value is None for value in expected.values()):
             status.append("Excluded")
         if output_mismatch:
             status.append("Generate needed")
@@ -896,20 +926,49 @@ class Editor(QMainWindow):
 
     def remove_missing_refs(self, refs):
         updates = {(ref, None): None for ref in refs if ref not in self.project.source}
+        removed = {ref for ref, _ in updates}
+        groups = getattr(self.project, "assembly_groups", [])
+        affected = [g for g in groups if removed.intersection(g["references"])]
+        if affected:
+            message = "Removing these references also removes their shared combined alternatives:\n"
+            message += "\n".join(", ".join(g["references"])+" => "+g["anchor"] for g in affected)
+            message += "\nRemaining members return to their retained individual selections. Continue?"
+            if QMessageBox.question(self, "Remove combined alternatives", message,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            updates[(None, "assembly_groups")] = [g for g in groups if g not in affected]
         self.change_content(updates, "Remove missing components", regroup=True)
 
     def edit_alternates(self, refs):
-        dialog = AlternatesDialog(refs, self.project.records[refs[0]], self)
+        dialog = AlternatesDialog(refs, self.project.records[refs[0]], self, project=self.project)
         if dialog.exec() != QDialog.Accepted:
             return
         updates = {}
         for ref in refs:
             updates[(ref, "Alternates")] = dialog.alternates
             updates[(ref, "Output selection")] = dialog.selection
-        self.change_content(updates, "Edit alternates")
+        updates[(None, "assembly_groups")] = dialog.groups
+        self.change_content(updates, "Edit alternates", regroup=True)
 
     def select_output_component(self, refs, selection):
-        self.change_content({(ref, "Output selection"): selection for ref in refs}, "Select output component")
+        groups = getattr(self.project, "assembly_groups", [])
+        group_id = selection if isinstance(selection, str) else None
+        result = choose_group(groups, refs, group_id)
+        changed = [g for g in groups if g.get("active", False) != next(x for x in result if x["id"] == g["id"]).get("active", False)]
+        if changed:
+            target = next((g for g in result if g["id"] == group_id), None)
+            affected = sorted({r for g in changed for r in g["references"]}, key=ref_key)
+            message = ("Use one " + target["component"]["Name"] + " at " + target["anchor"] + "?\n" if target else "Return to individual components?\n")
+            message += "Affected references: " + ", ".join(affected) + ".\n"
+            message += ("Overlapping combined choices will be deactivated. Individual selections are retained."
+                        if target else "Other members return to their retained selections; this row uses your new choice.")
+            if QMessageBox.question(self, "Change combined alternative", message,
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                self.repaint_rows(); return
+        updates = {(None, "assembly_groups"): result}
+        if group_id is None:
+            updates.update({(ref, "Output selection"): selection for ref in refs})
+        self.change_content(updates, "Select output component", regroup=True)
 
     def expand_rows_at(self, selected):
         self.clear_output_spans()
@@ -965,6 +1024,9 @@ class Editor(QMainWindow):
             values = [self.table.item(i, c).text() for c in range(self.table.columnCount()) if self.table.item(i, c)]
             alternates = self.project.records[self.view_rows[i][0]].get("Alternates", [])
             values.extend(value for alternate in alternates for value in alternate.values() if isinstance(value, str))
+            for group in groups_for(self.project, self.view_rows[i][0]):
+                values.extend(group["references"])
+                values.extend(group["component"].values())
             self.table.setRowHidden(i, not matches_terms(terms, values))
         self.merge_output_cells()
         self.update_status()
@@ -1001,6 +1063,10 @@ class Editor(QMainWindow):
         keys = {}
         included = {}
         for ref in sorted(self.project.records, key=ref_key):
+            if groups_for(self.project, ref):
+                keys[ref] = ("combined-member", ref)
+                included[keys[ref]] = False
+                continue
             component = selected_component(self.project.records[ref])
             key = tuple(component.get(field, "") for field in FIELDS)
             keys[ref] = key
@@ -1090,6 +1156,8 @@ class Editor(QMainWindow):
             self.log.appendPlainText(f"Generated {bom} BOM rows and {cpl} CPL rows. XLS: {self.project.output_dir}")
             report = self.project.cpl_report
             if report:
+                if report.merged:
+                    self.log.appendPlainText("CPL footprints merged: " + "; ".join(report.merged))
                 if report.adjusted:
                     self.log.appendPlainText("CPL footprint adjustments applied: " + ", ".join(report.adjusted))
                 if report.removed:
@@ -1120,18 +1188,44 @@ class Editor(QMainWindow):
             unknown = []
             updates = {}
             import_groups = {}
+            combined_choices = deepcopy(getattr(self.project, "assembly_groups", []))
             for ref, part in assignments.items():
                 if ref not in self.project.records:
                     unknown.append(ref)
                     continue
-                key = (record_group_key(self.project.records[ref]), part)
+                combined = active_group(self.project, ref)
+                key = ((record_group_key(self.project.records[ref]), combined["id"] if combined else None), part)
                 import_groups.setdefault(key, []).append(ref)
             for (_, part), refs in import_groups.items():
                 refs.sort(key=ref_key)
                 ref = refs[0]
                 old = self.project.records[ref]["LCSC Part #"]
                 record = self.project.records[ref]
+                combined = active_group(self.project, ref)
+                if combined:
+                    if part == combined["component"].get("LCSC Part #", "").upper():
+                        continue
+                    prompt = QMessageBox(self)
+                    prompt.setWindowTitle("Combined part assignment differs")
+                    prompt.setText(f"{', '.join(combined['references'])} => {combined['anchor']}: imported {part} differs from the combined part number.")
+                    prompt.setInformativeText("Individual part choices will be retained. Component fields are copied from the combined part; review them in Edit alternates.")
+                    replace_button = prompt.addButton("Change combined part number", QMessageBox.AcceptRole)
+                    alternate_button = prompt.addButton("Add combined alternative", QMessageBox.ActionRole)
+                    skip_button = prompt.addButton("Skip", QMessageBox.RejectRole)
+                    prompt.setDefaultButton(skip_button); prompt.setEscapeButton(skip_button); prompt.exec()
+                    choice = next(g for g in combined_choices if g["id"] == combined["id"])
+                    if prompt.clickedButton() == alternate_button:
+                        choice = deepcopy(choice); choice["id"] = uuid4().hex; choice["active"] = False
+                        combined_choices.append(choice); added += len(refs)
+                    elif prompt.clickedButton() == replace_button:
+                        replaced += len(refs)
+                    else:
+                        declined += len(refs); continue
+                    choice["component"]["LCSC Part #"] = part
+                    choice["component"]["Notes"] = "Imported part number; verify component fields."
+                    continue
                 known_parts = {old.upper(), *(alternate["LCSC Part #"].upper() for alternate in record["Alternates"])}
+                known_parts.update(g["component"].get("LCSC Part #", "").upper() for g in groups_for(self.project, ref))
                 if part in known_parts:
                     continue
                 if any(known_parts):
@@ -1162,6 +1256,7 @@ class Editor(QMainWindow):
                     filled += len(refs)
                 for ref in refs:
                     updates[(ref, "LCSC Part #")] = part
+            updates[(None, "assembly_groups")] = combined_choices
             self.change_content(updates, "Import JLCPCB numbers", regroup=True)
             self.update_controls()
             self.log.appendPlainText(f"LCSC import: filled {filled}, overwritten {replaced}, added alternates {added}, declined {declined}. Save JSON to retain edits.")
@@ -1173,7 +1268,7 @@ class Editor(QMainWindow):
     def check_stock(self):
         self.commit_editor()
         if self.project and not self.process:
-            StockDialog(self.project.records, self.stock_cache, self).exec()
+            StockDialog(assembly_records(self.project), self.stock_cache, self).exec()
 
     def check_with_ai(self):
         self.commit_editor()
@@ -1205,7 +1300,8 @@ class Editor(QMainWindow):
             self.check_input_file = QTemporaryFile(self)
             if not self.check_input_file.open():
                 raise OSError("Could not prepare the project for the AI check.")
-            snapshot = json.dumps({"schema_version": 1, "rows": grouped_rows(self.project.records)}, ensure_ascii=False).encode("utf-8")
+            snapshot = json.dumps({"schema_version": 1, "rows": grouped_rows(self.project.records),
+                                   "assembly_alternatives": getattr(self.project, "assembly_groups", [])}, ensure_ascii=False).encode("utf-8")
             if self.check_input_file.write(snapshot) != len(snapshot):
                 raise OSError("Could not write the project snapshot for the AI check.")
             self.check_input_file.close()
@@ -1376,13 +1472,13 @@ class Editor(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("schematic", nargs="?", type=Path, help="Optional .dchxml to open")
+    parser.add_argument("project", nargs="?", type=Path, help="Optional BOM project .json or schematic .dchxml to open")
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     protect_values_from_wheel(app)
     configure_app_icon(app, "jlcpcb_bom")
     app.setStyle(EditorStyle("Fusion"))
-    window = Editor(args.schematic)
+    window = Editor(args.project)
     window.show()
     return app.exec()
 

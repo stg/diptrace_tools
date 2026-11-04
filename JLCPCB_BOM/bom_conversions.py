@@ -7,7 +7,7 @@ import csv
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 COMPANION_ROOT = Path(__file__).resolve().parent.parent
@@ -224,6 +224,7 @@ class CPLResult:
     removed: list[str]
     missing: list[str]
     adjusted: list[str]
+    merged: list[str] = field(default_factory=list)
 
 
 def cpl_number(value, description):
@@ -342,7 +343,7 @@ def convert_cpl_to_xls(csv_path: Path, bom_path: Path, output_path: Path,
 
 
 def convert_cpl_for_bom_rows(csv_path: Path, bom_rows, output_path: Path,
-                            *, adjustments_path: Path | None = None, decimal_places=3) -> CPLResult:
+                            *, adjustments_path: Path | None = None, decimal_places=3, assembly_groups=None) -> CPLResult:
     """Filter and correct placements using the final in-memory assembly BOM."""
     if type(decimal_places) is not int or not 0 <= decimal_places <= 9:
         raise ValueError("CPL decimal places must be an integer from 0 to 9.")
@@ -353,6 +354,9 @@ def convert_cpl_for_bom_rows(csv_path: Path, bom_rows, output_path: Path,
     allowed = set(footprints)
     adjustments = load_cpl_adjustments(adjustments_path or CPL_ADJUSTMENTS_PATH)
     cpl = validate_cpl_input(csv_path)
+    if assembly_groups:
+        from assembly_alternates import apply_groups_to_cpl
+        cpl = apply_groups_to_cpl(cpl, assembly_groups)
     ref_column = next((index for index, header in enumerate(cpl[0])
                        if header.strip().casefold() in {"refdes", "designator"}), None)
     if ref_column is None:
@@ -384,4 +388,6 @@ def convert_cpl_for_bom_rows(csv_path: Path, bom_rows, output_path: Path,
     write_xls_grid(rows, output_path, renamed)
     return CPLResult(len(rows) - 1, sorted(removed),
                      sorted(allowed - present, key=natural_reference_key),
-                     sorted(adjusted, key=natural_reference_key))
+                     sorted(adjusted, key=natural_reference_key),
+                     [",".join(g["references"]) + " => " + g["anchor"]
+                      for g in (assembly_groups or []) if g.get("active", False)])

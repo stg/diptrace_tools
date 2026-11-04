@@ -5,7 +5,7 @@ Create, maintain and check JLCPCB assembly files from a DipTrace design. Keep sc
 ## The workflow
 
 1. **Export from DipTrace:** an XML schematic (`.dchxml`) and a placement/CPL CSV.
-2. **Open the schematic** here. The editor creates a matching JSON file for your edits, part numbers, alternatives and notes.
+2. **Open the schematic or an existing BOM project JSON** here. Opening a schematic loads its matching JSON, or creates one for your edits, part numbers, alternatives and notes. Opening a JSON loads the schematic from its `source` path, relative to the JSON's folder unless absolute.
 3. **Edit and generate** the assembly BOM and CPL workbooks.
 4. **Upload to JLCPCB**, review the selected parts and download its selection workbook.
 5. **Read back the selections**, check them with AI, make corrections and generate again.
@@ -15,7 +15,7 @@ Create, maintain and check JLCPCB assembly files from a DipTrace design. Keep sc
 
 For `Board.dchxml`, the default placement filename is `Board_CPL.csv`, beside the schematic.
 
-Multipart symbols are counted once using their main unit, including exports with separate styles for different units. Letter-only PCB designators such as `BOOT` remain in the project JSON; DNM/DNP exclusion rules can omit them from assembly output.
+Multipart symbols are counted once using their main unit, including exports with separate styles for different units. Letter-only PCB designators such as `BOOT` remain visible in the editor and project JSON; DNM/DNP exclusion rules can omit them from assembly output.
 
 Export these placement columns from DipTrace; their order may vary:
 
@@ -35,6 +35,8 @@ Comma, semicolon and tab separators are accepted; extra columns are allowed. Coo
 
 ## Edit the project
 
+The Open dialog and command line accept `.dchxml` and `.json`. A JSON can have a different name or folder from its schematic; Reload and Recent Files keep that chosen JSON. If its referenced schematic has moved, select the new location when prompted, then save JSON to remember the link. Cancelling leaves the current project unchanged. Output-folder and CPL paths retain their existing meaning relative to the schematic.
+
 | Grid area | Contents |
 | --- | --- |
 | **Input** | Data from the exported schematic. |
@@ -45,6 +47,22 @@ Comma, semicolon and tab separators are accepted; extra columns are allowed. Coo
 - **Notes** are searchable and included in AI checking. They do not enter the assembly files or schematic back-annotation.
 - Adjacent rows that generate one BOM line share the three Output cells. Sorting/filtering updates this grouping; JSON fields and notes stay separate.
 - **Reload — Ctrl+R** rereads the schematic and JSON, asking before discarding unsaved edits.
+
+### Combined alternatives
+
+Use **Edit alternates → Add combined alternate** to replace several designators with one assembly component. Enter the member references in pin order, the replacement part, and an output/anchor reference from the members. The shared choice appears in every member's existing output selector. Editing or removing it from any member affects the same shared definition.
+
+Preview the placement before applying. X/Y offsets are in mm along the anchor's CPL axes, rotated by its source rotation (the same convention on either PCB side); additional rotation affects the replacement only. The preview lists placement origins, not pads: verify the replacement's physical footprint and pin order. Generation checks the saved relative member positions (0.05 mm position tolerance, 0.01° rotation tolerance), PCB side and missing/duplicate placements before changing output files. A rigid move or rotation of the whole group remains valid.
+
+Selecting a combined alternative warns which components will change and deactivates overlapping choices. Individual primary/alternate selections remain stored. Choosing an ordinary component on any member deactivates the combined choice and restores the other members; removing the shared alternative does the same. These operations support undo/redo. Group members remain separate grid rows so their selectors are always accessible.
+
+Generation emits only the anchor designator in BOM/CPL, using the replacement part and adjusted origin. Stock checks and AI checks use this same assembly choice. Schematic back-annotation still uses individual primary fields. Mating plugs are independent and are not combined automatically. Definitions and active choices are saved in the JSON's `assembly_alternatives` list; each has `id`, `references`, `anchor`, `component`, `placement`, `layout` and `active` fields.
+
+Projects with combined alternatives use JSON schema version 2 so older editors reject them instead of silently generating individual parts. Existing version 1 projects remain supported. The generation log lists `CPL footprints merged: A,B => A; C,D,E => C` separately from ordinary footprint corrections and exclusions.
+
+Changing the anchor preserves the replacement's physical position and orientation. A changed source placement invalidates a pending preview and requires review again. Removing missing designators also offers to remove their shared alternatives, restoring the remaining members. Importing a different part number for an active combined choice offers to change that shared part or add another combined alternative without overwriting the individual components.
+
+Generation prepares both workbooks before publishing BOM, CPL and saved JSON together. A reported publication failure restores already-replaced files; close any open workbook and retry.
 
 ### Filter the grid
 

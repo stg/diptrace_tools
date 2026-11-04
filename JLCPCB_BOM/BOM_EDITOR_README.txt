@@ -15,10 +15,10 @@ the check before downloading or replacing reports.
 Windows: double-click "Launch JLCPCB BOM Editor.cmd".
 macOS: use "Launch JLCPCB BOM Editor.command".
 Linux: run sh "Launch JLCPCB BOM Editor.sh".
-Then choose any .dchxml schematic. See the root README.md for setup.
-The app reopens the last schematic on launch. If it is unavailable, the opening
-picker uses the last selected schematic folder. An explicit command-line file
-overrides the remembered file. File -> Open Recent lists the last 10 schematics.
+Then choose a .dchxml schematic or a BOM project .json. See the root README.md for setup.
+The app reopens the last project on launch. If it is unavailable, the opening
+picker uses the last selected folder. An explicit command-line file overrides
+the remembered file. File -> Open Recent lists the last 10 opened files.
 Window size/position, column widths, and the grid/log split are remembered on exit.
 Alternatively:
     python bom_editor.py "D:\path\Board.dchxml"
@@ -30,6 +30,11 @@ Files and truth
 ---------------
 Opening Board.dchxml loads Board.json beside it, or creates that JSON from the
 schematic when it is missing. Existing BOM_modified.csv files are not imported.
+Opening a JSON instead resolves its source schematic path relative to the JSON
+folder, unless absolute. Different JSON names and folders are supported; Reload
+and Recent Files preserve the chosen JSON. A missing source prompts for its new
+location; save JSON to remember the repaired link. Cancelling keeps the current
+project. Output folder and CPL paths remain relative to the schematic.
 The JSON stores grouped RefDes, Name, Value, Pattern and LCSC Part # rows, with
 schema_version 1 and output_folder ./order (relative to the schematic).
 
@@ -156,6 +161,37 @@ and Pattern into primary JSON fields with undo/redo support. JLCPCB part numbers
 alternates, and output selection are preserved.
 These actions affect only that row's designators (all occurrences in a grouped
 row). Expand is available for grouped rows; expand first to target one occurrence.
+
+Combined alternatives
+---------------------
+Edit alternates -> Add combined alternate defines one shared replacement for
+several references. It appears in every member's existing output dropdown.
+Enter members in pin order, a replacement part, an output/anchor reference and
+local placement offsets. Preview before applying; origins are shown, not pads.
+Verify the footprint and pin order. X/Y offsets are mm in the rotated anchor CPL
+axes (also on Bottom); extra rotation applies only to the replacement.
+
+Selecting a combined choice warns which references change. Overlapping active
+choices are deactivated; individual selections remain untouched underneath.
+Selecting an ordinary part on any member, or removing the shared choice, restores
+the other members' individual selections. All changes support undo/redo.
+Members remain separate grid rows. Editing a shared choice from any member edits
+that same definition; no duplicated alternate lists need maintaining.
+
+Generate emits one BOM/CPL component using the anchor reference, replacement part
+and corrected placement. Saved relative member positions are checked before output
+(0.05 mm position / 0.01 degree rotation tolerance), including side and missing or
+duplicate CPL entries. Whole-group moves/rotations are supported. Stock/AI checks
+use the same assembly selection. Individual primary fields remain the source for
+back-annotation. Mating plugs are independent. JSON stores the shared definitions
+and active flags in assembly_alternatives; ordinary row selections are retained.
+Projects using combined alternatives use schema version 2; version 1 stays supported.
+Changing the anchor preserves the replacement's physical pose. A changed source
+invalidates an unaccepted placement preview. Removing missing members also offers
+to remove their shared alternatives, with undo. Imports into an active combined
+choice change that shared part or add a new combined alternative, never its
+retained individual component. Generation stages both workbooks before publishing
+BOM, CPL and saved JSON; reported write failures restore replaced files.
 
 Alternates
 ----------

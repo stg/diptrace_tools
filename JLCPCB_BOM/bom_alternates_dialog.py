@@ -1,5 +1,6 @@
 """Modal editor for the alternate components of a BOM row."""
 from copy import deepcopy
+import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -11,13 +12,16 @@ from bom_editor_core import ALTERNATE_FIELDS, validate_lcsc
 
 
 class AlternatesDialog(QDialog):
-    def __init__(self, refs, record, parent=None):
+    def __init__(self, refs, record, parent=None, project=None):
         super().__init__(parent)
         self.setWindowTitle("Edit alternates — " + ", ".join(refs))
         self.resize(950, 380)
         self.primary = record
         self.selection = record.get("Output selection", 0)
         self.alternates = deepcopy(record.get("Alternates", []))
+        self.project = project
+        self.refs = refs
+        self.groups = deepcopy(getattr(project, "assembly_groups", []))
         layout = QVBoxLayout(self)
         primary = QLabel("Primary: " + " · ".join(record[field] for field in ALTERNATE_FIELDS[:-1] if record[field]))
         primary.setTextFormat(Qt.PlainText)
@@ -45,6 +49,24 @@ class AlternatesDialog(QDialog):
         controls.addWidget(remove)
         controls.addStretch()
         layout.addLayout(controls)
+        if project is not None:
+            layout.addWidget(QLabel("Combined alternatives shared with other components:"))
+            self.group_table = QTableWidget(0, 4)
+            self.group_table.setHorizontalHeaderLabels(["Output ref", "Included references", "Replacement", "LCSC number"])
+            self.group_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.group_table.setSelectionMode(QAbstractItemView.SingleSelection)
+            self.group_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            self.group_table.setColumnWidth(1, 260); self.group_table.setColumnWidth(2, 330)
+            self.group_table.cellDoubleClicked.connect(lambda *_: self.edit_group())
+            layout.addWidget(self.group_table)
+            group_controls = QHBoxLayout()
+            for label, callback in (("Add combined alternate", self.add_group),
+                                    ("Edit combined alternate", self.edit_group),
+                                    ("Remove combined alternate", self.remove_group)):
+                button = QPushButton(label); button.clicked.connect(callback); group_controls.addWidget(button)
+            layout.addLayout(group_controls)
+            self.refresh_groups()
+            self.resize(1050, 650)
         self.buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         self.buttons.button(QDialogButtonBox.Save).setText("Apply")
         self.buttons.accepted.connect(self.accept)
@@ -73,10 +95,47 @@ class AlternatesDialog(QDialog):
             self.table.removeRow(row)
 
     def content_state(self):
-        return (self.selection, [
+        return (json.dumps(self.groups, sort_keys=True), self.selection, [
             [self.table.item(row, column).text() for column in range(len(ALTERNATE_FIELDS))]
             for row in range(self.table.rowCount())
         ])
+
+    def refresh_groups(self):
+        self.visible_groups = [g for g in self.groups if set(self.refs).intersection(g["references"])]
+        self.group_table.setRowCount(len(self.visible_groups))
+        for row,g in enumerate(self.visible_groups):
+            for col,value in enumerate((g["anchor"], ", ".join(g["references"]),
+                                       g["component"]["Name"], g["component"].get("LCSC Part #", ""))):
+                cell = QTableWidgetItem(value); cell.setToolTip("Active" if g.get("active") else "Available in output selector")
+                self.group_table.setItem(row,col,cell)
+
+    def add_group(self):
+        self.open_group(None)
+
+    def edit_group(self):
+        row = self.group_table.currentRow()
+        if row >= 0:
+            self.open_group(self.visible_groups[row])
+
+    def open_group(self, group):
+        from combined_alternate_dialog import CombinedAlternateDialog
+        dialog = CombinedAlternateDialog(self.project, self.refs, group, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.groups = [g for g in self.groups if g["id"] != dialog.group["id"]] + [dialog.group]
+            self.refresh_groups()
+
+    def remove_group(self):
+        row = self.group_table.currentRow()
+        if row < 0:
+            return
+        group = self.visible_groups[row]
+        message = "Remove this shared alternative from " + ", ".join(group["references"]) + "?"
+        if group.get("active"):
+            message += " Their individual component selections will be restored."
+        if QMessageBox.question(self, "Remove combined alternative", message,
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes:
+            self.groups = [g for g in self.groups if g["id"] != group["id"]]
+            self.refresh_groups()
 
     def commit_editor(self):
         self.buttons.setFocus()
@@ -98,6 +157,12 @@ class AlternatesDialog(QDialog):
                 return
             alternates.append(alternate)
         self.alternates = alternates
+        if self.project is not None:
+            from assembly_alternates import validate_groups
+            try:
+                validate_groups(self.groups, self.project.records)
+            except ValueError as exc:
+                QMessageBox.warning(self, "Combined alternatives", str(exc)); return
         super().accept()
 
     def reject(self):
