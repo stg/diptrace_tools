@@ -14,6 +14,26 @@ def active_group(project, ref):
     return next((g for g in groups_for(project, ref) if g.get("active", False)), None)
 
 
+def import_target(project, ref, present, code):
+    """Infer an import's target from reference coverage, never from active state alone."""
+    groups = groups_for(project, ref)
+    if any(set(g["references"]) <= present for g in groups):
+        return None, False
+    candidates = [g for g in groups if g["anchor"] == ref and
+                  set(g["references"]).intersection(present) == {ref}]
+    matched = [g for g in candidates if g["component"].get("LCSC Part #", "").upper() == code]
+    if len(matched) == 1:
+        return matched[0], False
+    if len(candidates) == 1:
+        return candidates[0], False
+    if candidates:
+        return None, True
+    # Partial coverage containing an anchor could be an incomplete combined export.
+    partial = any(g["anchor"] in present and 1 < len(set(g["references"]) & present) < len(g["references"])
+                  for g in groups)
+    return None, partial
+
+
 def validate_groups(groups, records):
     if not isinstance(groups, list):
         raise ValueError("assembly_alternatives must be a list.")

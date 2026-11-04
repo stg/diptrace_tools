@@ -277,6 +277,13 @@ def workbook_grid(path):
     return [sheet.row_values(i) for i in range(sheet.nrows)]
 
 
+class AssignmentMap(dict):
+    """Assignments plus workbook coverage, including rows without a selected part."""
+    def __init__(self):
+        super().__init__()
+        self.references = set()
+
+
 def read_assignments(path):
     """Accept simple JLC BOM tables and BOM Matching/Assembly Order exports."""
     grid = workbook_grid(path)
@@ -287,13 +294,14 @@ def read_assignments(path):
                 if h.startswith("jlcpcb part #") or h in {"lcsc part #", "lcsc part number", "lcsc part", "lcsc"}]
         if ref_col is None or not cols:
             continue
-        assignments = {}
+        assignments = AssignmentMap()
         part_col = cols[-1]
         for values in grid[row_index + 1:]:
+            refs = row_references(str(values[ref_col] or "")) if ref_col < len(values) else []
+            assignments.references.update(refs)
             raw = str(values[part_col] or "").strip().upper() if part_col < len(values) else ""
             if not PART.fullmatch(raw):
                 continue
-            refs = REFS.findall(str(values[ref_col] or "")) if ref_col < len(values) else []
             for ref in refs:
                 ref = ref.upper()
                 if ref in assignments and assignments[ref] != raw:

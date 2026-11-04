@@ -188,9 +188,11 @@ and active flags in assembly_alternatives; ordinary row selections are retained.
 Projects using combined alternatives use schema version 2; version 1 stays supported.
 Changing the anchor preserves the replacement's physical pose. A changed source
 invalidates an unaccepted placement preview. Removing missing members also offers
-to remove their shared alternatives, with undo. Imports into an active combined
-choice change that shared part or add a new combined alternative, never its
-retained individual component. Generation stages both workbooks before publishing
+to remove their shared alternatives, with undo. Imports infer targets from all
+references present in the workbook, including unmatched rows: all members means
+individuals; only the combined output reference means the shared combined choice,
+regardless of active selection. Partial or ambiguous coverage asks before
+importing as individuals or skipping. Import does not change active choices. Generation stages both workbooks before publishing
 BOM, CPL and saved JSON; reported write failures restore replaced files.
 
 Alternates

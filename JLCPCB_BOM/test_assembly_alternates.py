@@ -12,9 +12,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox, QDialog
 from assembly_alternates import (choose_group, local_layout, apply_groups_to_cpl,
-                                 validate_groups, active_group, reanchor_placement)
+                                 validate_groups, active_group, reanchor_placement, import_target)
 from bom_editor_core import (Project, expand_rows, assembly_records, read_generated,
-                             workbook_grid, project_output_record, publish_files, atomic_write)
+                             workbook_grid, project_output_record, publish_files, atomic_write, read_assignments)
 from bom_editor import Editor, OUTPUT_COLUMN
 from bom_alternates_dialog import AlternatesDialog
 from combined_alternate_dialog import CombinedAlternateDialog
@@ -243,6 +243,52 @@ class AssemblyTests(unittest.TestCase):
                 else:self.assertEqual(groups[0]["component"]["LCSC Part #"],"C3")
                 validate_groups(groups,e.project.records)
                 e.project=None;e.close()
+
+    def test_import_targets_follow_coverage_and_detect_ambiguous_partial_exports(self):
+        p=SimpleNamespace(assembly_groups=[group()])
+        for active in (True,False):
+            p.assembly_groups[0]["active"]=active
+            self.assertEqual(import_target(p,"J1",{"J1","J2","J3"},"C3"),(None,False))
+            self.assertEqual(import_target(p,"J1",{"J1"},"C9")[0]["id"],"six")
+            self.assertEqual(import_target(p,"J1",{"J1","J2"},"C9"),(None,True))
+            self.assertEqual(import_target(p,"J2",{"J2"},"C9"),(None,False))
+        other=group("other");other["active"]=False;other["component"]["LCSC Part #"]="C4"
+        p.assembly_groups.append(other)
+        self.assertEqual(import_target(p,"J1",{"J1"},"C4")[0]["id"],"other")
+        self.assertEqual(import_target(p,"J1",{"J1"},"C9"),(None,True))
+
+    def test_full_individual_import_preserves_combined_part_even_when_active(self):
+        with tempfile.TemporaryDirectory() as folder:
+            e=self.make_editor(folder);before=deepcopy(e.project.assembly_groups)
+            with patch.object(Editor,"workbook_picker",return_value="selected.xls"), \
+                    patch("bom_editor.read_assignments",return_value={"J1":"C9","J2":"C9","J3":"C9"}), \
+                    patch.object(QMessageBox,"exec",return_value=0), \
+                    patch.object(QMessageBox,"clickedButton",lambda box:next(b for b in box.buttons() if b.text()=="Replace primary")):
+                e.import_lcsc()
+            self.assertEqual(e.project.assembly_groups,before)
+            self.assertEqual({r["LCSC Part #"] for r in e.project.records.values()},{"C9"})
+            e.undo_content();self.assertEqual({r["LCSC Part #"] for r in e.project.records.values()},{"C1"})
+            e.project=None;e.close()
+
+    def test_blank_part_rows_still_identify_individual_export(self):
+        rows=[["Designator","LCSC Part #"],["J1","C9"],["J2",""],["J3","No Part Selected"]]
+        with patch("bom_editor_core.workbook_grid",return_value=rows):assignments=read_assignments("selected.xls")
+        self.assertEqual(assignments,{"J1":"C9"})
+        self.assertEqual(assignments.references,{"J1","J2","J3"})
+        p=SimpleNamespace(assembly_groups=[group()])
+        self.assertEqual(import_target(p,"J1",assignments.references,"C9"),(None,False))
+
+    def test_partial_import_can_be_skipped_without_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            e=self.make_editor(folder);before=deepcopy(e.project.records)
+            with patch.object(Editor,"workbook_picker",return_value="selected.xls"), \
+                    patch("bom_editor.read_assignments",return_value={"J1":"C9","J2":"C9"}), \
+                    patch.object(QMessageBox,"question",return_value=QMessageBox.No), \
+                    patch.object(QMessageBox,"exec") as prompts:
+                e.import_lcsc()
+            prompts.assert_not_called();self.assertEqual(e.project.records,before)
+            self.assertTrue(e.project.assembly_groups[0]["active"])
+            e.project=None;e.close()
 
     def test_dialog_reanchor_and_stale_preview_require_review(self):
         with tempfile.TemporaryDirectory() as folder:

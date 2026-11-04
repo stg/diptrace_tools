@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from bom_editor_core import Project, MissingSchematic, FIELDS, grouped_rows, row_references, record_group_key, selected_component, output_record, read_assignments, validate_lcsc, ref_key, names_match, name_has_added_suffix, value_has_added_suffix, pattern_difference_is_warning, natural_sort_key, value_sort_key
 from bom_alternates_dialog import AlternatesDialog
-from assembly_alternates import groups_for, active_group, choose_group
+from assembly_alternates import groups_for, active_group, choose_group, import_target
 from bom_editor_core import project_output_record, assembly_records
 from stock_dialog import StockDialog
 from bom_conversions import CPL_ADJUSTMENTS_PATH, MissingCPLFile
@@ -1189,11 +1189,25 @@ class Editor(QMainWindow):
             updates = {}
             import_groups = {}
             combined_choices = deepcopy(getattr(self.project, "assembly_groups", []))
+            present = set(getattr(assignments, "references", assignments))
+            targets = {}
+            ambiguous = []
+            for ref, part in assignments.items():
+                target, uncertain = import_target(self.project, ref, present, part)
+                targets[ref] = target
+                if uncertain:
+                    ambiguous.append(ref)
+            if ambiguous:
+                message = "Reference coverage does not identify a unique combined target for: " + ", ".join(ambiguous)
+                message += ".\nImport these rows as individual components? No skips these rows."
+                if QMessageBox.question(self, "Partial or ambiguous group import", message,
+                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                    assignments = {r:p for r,p in assignments.items() if r not in ambiguous}
             for ref, part in assignments.items():
                 if ref not in self.project.records:
                     unknown.append(ref)
                     continue
-                combined = active_group(self.project, ref)
+                combined = targets[ref]
                 key = ((record_group_key(self.project.records[ref]), combined["id"] if combined else None), part)
                 import_groups.setdefault(key, []).append(ref)
             for (_, part), refs in import_groups.items():
@@ -1201,7 +1215,7 @@ class Editor(QMainWindow):
                 ref = refs[0]
                 old = self.project.records[ref]["LCSC Part #"]
                 record = self.project.records[ref]
-                combined = active_group(self.project, ref)
+                combined = targets[ref]
                 if combined:
                     if part == combined["component"].get("LCSC Part #", "").upper():
                         continue
@@ -1225,7 +1239,6 @@ class Editor(QMainWindow):
                     choice["component"]["Notes"] = "Imported part number; verify component fields."
                     continue
                 known_parts = {old.upper(), *(alternate["LCSC Part #"].upper() for alternate in record["Alternates"])}
-                known_parts.update(g["component"].get("LCSC Part #", "").upper() for g in groups_for(self.project, ref))
                 if part in known_parts:
                     continue
                 if any(known_parts):
